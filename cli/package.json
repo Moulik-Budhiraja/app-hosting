@@ -1,0 +1,39 @@
+{
+  "name": "@moulikbudhiraja/apps-cli",
+  "version": "0.1.0",
+  "description": "Publish auto-updating Mac apps to an apps remote (apps.moulik.dev, apps.proletic.co)",
+  "author": "Moulik Budhiraja",
+  "homepage": "https://github.com/Moulik-Budhiraja/app-hosting#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Moulik-Budhiraja/app-hosting.git",
+    "directory": "cli"
+  },
+  "type": "module",
+  "bin": {
+    "apps": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@napi-rs/keyring": "^1.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

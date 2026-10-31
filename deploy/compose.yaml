@@ -1,0 +1,39 @@
+# One remote per host. Run from this directory with its own .env:
+#   docker compose up -d --build
+name: apps
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: apps-server:local
+    container_name: apps-server
+    init: true
+    restart: unless-stopped
+    env_file: .env
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./data:/data
+    ports:
+      - "127.0.0.1:${APPS_PORT_HOST:-37650}:3000"
+    networks:
+      proxy:
+        aliases:
+          - apps-server
+    mem_limit: 256m
+    cpus: 0.5
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '2'
+networks:
+  proxy:
+    external: true
+    name: nginx-proxy_default
