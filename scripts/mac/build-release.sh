@@ -7,13 +7,17 @@
 #
 # Prints dmg=, zip= and blockmap= lines (paths of what to publish) and
 # minimum_system_version= (the app's LSMinimumSystemVersion, may be empty).
-# Build output goes to stderr.
+# Nothing else goes to stdout: build, signing and notary output goes to stderr.
 #
 # Env: VERSION, BUILD; APPS_KEYCHAIN, APPS_SIGN_IDENTITY, APPS_SIGN_NAME and
 # APPS_NOTARY_KEY from keychain.sh; APPLE_KEY_ID and APPLE_ISSUER_ID (or
 # NOTARY_PROFILE, native only). SKIP_NOTARIZE=1 signs without notarizing,
 # for a local dry run; the result isn't publishable.
 set -euo pipefail
+# Only the key=value lines may reach stdout, since callers append it to
+# $GITHUB_OUTPUT. Tools like `xcrun stapler` print progress to stdout, so
+# everything else goes to stderr and the results go to fd 3.
+exec 3>&1 1>&2
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=scripts/mac/lib.sh
 source "$here/lib.sh"
@@ -60,7 +64,7 @@ if [[ $kind == native ]]; then
 
   note "building: $command"
   rm -rf "$app"
-  bash -c "$command" >&2
+  bash -c "$command"
   [[ -d $app ]] || die "the build command didn't produce $app"
 
   version_in_app=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null || true)
@@ -76,10 +80,10 @@ if [[ $kind == native ]]; then
   if [[ $skip_notarize != 1 ]]; then
     "$here/verify.sh" "$dmg" "$app"
   fi
-  echo "dmg=$dmg"
-  echo "zip="
-  echo "blockmap="
-  echo "minimum_system_version=$(minimum_system_version "$app")"
+  echo "dmg=$dmg" >&3
+  echo "zip=" >&3
+  echo "blockmap=" >&3
+  echo "minimum_system_version=$(minimum_system_version "$app")" >&3
   exit 0
 fi
 
@@ -105,7 +109,7 @@ blockmap=$(resolve "$(setting blockmap)")
 note "building: $command"
 # Apple's timestamp server sometimes fails one signature in the middle of
 # electron-builder's run, so the whole build is tried again.
-retry 3 bash -c "$command" >&2
+retry 3 bash -c "$command"
 for f in "$dmg" "$zip" ${blockmap:+"$blockmap"}; do
   [[ -f $f ]] || die "the build command didn't produce $f"
 done
@@ -129,7 +133,7 @@ fi
 if [[ $skip_notarize != 1 ]]; then
   "$here/verify.sh" "$dmg" "$zipped_app"
 fi
-echo "dmg=$dmg"
-echo "zip=$zip"
-echo "blockmap=$blockmap"
-echo "minimum_system_version=$(minimum_system_version "$zipped_app")"
+echo "dmg=$dmg" >&3
+echo "zip=$zip" >&3
+echo "blockmap=$blockmap" >&3
+echo "minimum_system_version=$(minimum_system_version "$zipped_app")" >&3
