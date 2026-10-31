@@ -49,6 +49,9 @@ minimum_system_version() {
 
 out_dir="dist/apps-release"
 mkdir -p "$out_dir"
+# Ignore the output without touching the app's .gitignore, so the tree stays
+# clean for the next release-local.sh, and DMGs are never committed.
+[[ -f $out_dir/.gitignore ]] || printf '*\n' > "$out_dir/.gitignore"
 
 if [[ $kind == native ]]; then
   app=$(setting app_path)
