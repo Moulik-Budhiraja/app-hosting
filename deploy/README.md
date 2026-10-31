@@ -5,8 +5,8 @@ Proxy Manager. The two remotes:
 
 | Remote | URL | Host | Checkout |
 | --- | --- | --- | --- |
-| `moulik` | https://apps.moulik.dev | hp | `/root/hosting/apps` |
-| `proletic` | https://apps.proletic.co | rs | `/root/hosting/production/apps` |
+| `moulik` | https://apps.moulik.dev | hp | `/root/hosting/app-hosting` |
+| `proletic` | https://apps.proletic.co | rs | `/root/hosting/production/app-hosting` |
 
 ## First time
 
