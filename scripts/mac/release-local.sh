@@ -68,6 +68,7 @@ outputs=$("$here/build-release.sh" apps.json)
 dmg=$(grep -m1 '^dmg=' <<<"$outputs" | cut -d= -f2-)
 zip=$(grep -m1 '^zip=' <<<"$outputs" | cut -d= -f2-)
 blockmap=$(grep -m1 '^blockmap=' <<<"$outputs" | cut -d= -f2-)
+minimum_system_version=$(grep -m1 '^minimum_system_version=' <<<"$outputs" | cut -d= -f2-)
 
 if [[ $dry_run == 1 ]]; then
   note "dry run: built $dmg (signed, not notarized, not published)"
@@ -77,6 +78,7 @@ fi
 publish=("${apps_cli[@]}" publish --version "$VERSION" --build "$BUILD" --dmg "$dmg")
 [[ -n $zip ]] && publish+=(--zip "$zip")
 [[ -n $blockmap ]] && publish+=(--blockmap "$blockmap")
+[[ -n $minimum_system_version ]] && publish+=(--minimum-system-version "$minimum_system_version")
 if (( ${#notes_args[@]} )); then
   publish+=("${notes_args[@]}")
 fi
