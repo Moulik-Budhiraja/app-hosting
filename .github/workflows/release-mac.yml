@@ -154,7 +154,9 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          # An annotated tag's message becomes the release notes.
+          # An annotated tag's message becomes the release notes. actions/checkout
+          # fetches the pushed tag as a lightweight tag, so fetch the tag object.
+          git fetch --quiet --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
           file="$RUNNER_TEMP/release-notes.md"
           if [[ $(git cat-file -t "refs/tags/$TAG") == tag ]]; then
             git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG" | sed -e '/^-----BEGIN PGP SIGNATURE-----/,$d' > "$file"
