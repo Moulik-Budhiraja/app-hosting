@@ -115,6 +115,21 @@ Menu-bar or LSUIElement apps should offer "Check for Updates…" somewhere, wire
   - Leave the final signing to the workflow. An ad-hoc `codesign --sign -` is fine for
     local runs.
   - Check with `otool -L` and by launching the built app before releasing.
+- **Local and release builds must use the same build numbers.** Sparkle compares
+  `CFBundleVersion`. If local builds use a timestamp or a counter, a local install
+  outranks every release and never updates. Default `BUILD` to the release scheme
+  (`apps build-number`) when it isn't set.
+- **Apps that hold privacy permissions** (Accessibility, Screen Recording, and so on):
+  macOS ties the grants to the designated requirement, which for a Developer ID app is
+  the bundle ID plus the team ID. Keep both the same as the installed copy and the grants
+  survive the switch to release builds and every update. Compare
+  `codesign -d -r- <installed app>` with the release build's before shipping. An ad hoc
+  build loses them.
+- **Updates and long-running work.** `SUAutomaticallyUpdate` downloads silently and
+  installs on quit. An app that mustn't restart mid-task (agents, recordings, servers)
+  can return `true` from `updater(_:willInstallUpdateOnQuit:immediateInstallationBlock:)`
+  and call the block once it's idle, and postpone "Install and Relaunch" with
+  `updater(_:shouldPostponeRelaunchForUpdate:untilInvokingBlock:)`.
 
 ## Day-to-day commands
 

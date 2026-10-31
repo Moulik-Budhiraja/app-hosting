@@ -269,5 +269,7 @@ times.
   and `--notes-file` from an annotated tag's message.
 - `apps.json`: a `native` build must use `sparkle`, and an `electron` build must use
   `electron`.
+- Release output goes to `dist/apps-release/` in the app repo. That folder holds a
+  `.gitignore` of `*`, so it never shows in `git status` or gets committed.
 - `scripts/mac/release-local.sh <version>` runs the same pipeline from a Mac when the
   runner is down. `DRY_RUN=1` stops after signing.
