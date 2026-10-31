@@ -220,6 +220,13 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
 
   const signing = await findSigningFiles(expandHome(options.signingDir ?? "~/.config/predictor-release", deps), options.keyId);
 
+  // The macos-ephemeral runner serves public repos only from an allowlist, and
+  // only if a fork pull request can't run workflows on it without approval.
+  const visibility = JSON.parse(
+    (await deps.gh.run(["api", `repos/${repo}`, "--jq", "{private: .private}"])) || "{}",
+  ) as { private?: boolean };
+  const isPublic = visibility.private === false;
+
   let issuer = options.appleIssuerId?.trim() || config.appleIssuerId;
   let saveIssuer = Boolean(options.appleIssuerId?.trim() && options.appleIssuerId.trim() !== config.appleIssuerId);
   if (!issuer && !options.dryRun) {
@@ -279,10 +286,12 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
         `  • set environment secrets: ${secretNames.join(", ")}`,
         `    (Apple files from ${signing.dir}, key ${signing.keyId}${issuer ? "" : "; would ask for the issuer ID"})`,
         writeWorkflow ? `  • write ${WORKFLOW_PATH}` : `  • keep the existing ${WORKFLOW_PATH}`,
+        ...(isPublic ? [`  • require approval for workflows from every external contributor's fork pull request`] : []),
+        ...(isPublic ? ["", ...publicRepoLines(repo)] : []),
         "",
         ...integrationLines(file, publicKey),
       ],
-      { dryRun: true, ...summary },
+      { dryRun: true, ...summary, public: isPublic },
     );
     return;
   }
@@ -316,6 +325,12 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
   if (!policies.branch_policies?.some((item) => item.name === policy && (item.type ?? "branch") === "tag")) {
     await deps.gh.run(["api", "-X", "POST", `repos/${repo}/environments/${ENVIRONMENT}/deployment-branch-policies`, "--input", "-"], {
       input: JSON.stringify({ name: policy, type: "tag" }),
+    });
+  }
+
+  if (isPublic) {
+    await deps.gh.run(["api", "-X", "PUT", `repos/${repo}/actions/permissions/fork-pr-contributor-approval`, "--input", "-"], {
+      input: JSON.stringify({ approval_policy: "all_external_contributors" }),
     });
   }
 
@@ -355,9 +370,20 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
       writeWorkflow ? `  Wrote ${WORKFLOW_PATH}. Commit it.` : `  Kept the existing ${WORKFLOW_PATH}.`,
       `  Release by pushing a tag on main, e.g. ${file.tagPrefix}1.0.0`,
       previous.length ? `  Revoked ${previous.length} older publish token${previous.length === 1 ? "" : "s"}.` : "",
+      isPublic ? `  Fork pull requests now need your approval before their workflows run.` : "",
       "",
+      ...(isPublic ? [...publicRepoLines(repo), ""] : []),
       ...integrationLines(file, publicKey),
     ].filter((line, index, lines) => line !== "" || lines[index - 1] !== ""),
     { dryRun: false, ...summary, tokenId: created.id, revokedTokens: previous.map((token) => token.id) },
   );
+}
+
+function publicRepoLines(repo: string): string[] {
+  return [
+    `${repo} is public. The macos-ephemeral runner on ralph only takes jobs from private repos and`,
+    `from the public repos in its publicRepositories list, so add ${repo} to the "personal"`,
+    `source in ralph's controller config (see Proletic/macos-runner) before the first release.`,
+    `Until then the release job stays queued.`,
+  ];
 }

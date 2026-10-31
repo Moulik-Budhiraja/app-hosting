@@ -203,7 +203,7 @@ commit that already succeeded returns 409 `already_published`.
 | `apps login <remote> [--token-stdin]` | prompt for the admin token (hidden), check it with `whoami`, store it |
 | `apps logout <remote>` | forget the token |
 | `apps create <app> --remote <r> --updater sparkle\|electron [--title T] [--kind native\|electron]` | create the app on the remote (for sparkle: generate an Ed25519 key pair, keep the private key in the keychain, send the public key) and write `apps.json` in the current directory |
-| `apps init [--repo owner/name] [--signing-dir ~/.config/predictor-release]` | in a repo with `apps.json`: create the GitHub `production` environment, allowed only from `<tagPrefix>*` tags; set the environment secrets (below); write `.github/workflows/release.yml` if missing; print what the app must contain (Sparkle `SUFeedURL`/`SUPublicEDKey`, or electron-builder `publish: {provider: generic, url: <public>/<app>/}`) |
+| `apps init [--repo owner/name] [--signing-dir ~/.config/predictor-release]` | in a repo with `apps.json`: create the GitHub `production` environment, allowed only from `<tagPrefix>*` tags; set the environment secrets (below); write `.github/workflows/release.yml` if missing; for a public repo, require approval for workflows from every external contributor's fork pull request and say that the runner must allowlist the repo; print what the app must contain (Sparkle `SUFeedURL`/`SUPublicEDKey`, or electron-builder `publish: {provider: generic, url: <public>/<app>/}`) |
 | `apps publish --version X [--build N] [--notes-file f] --dmg p [--zip p] [--blockmap p] [--minimum-system-version v]` | read `apps.json`, sign the DMG for sparkle, upload with progress, commit, print the release |
 | `apps releases [--app a --remote r]` | list releases |
 | `apps withdraw <version>` / `apps restore <version>` | admin |
@@ -232,7 +232,17 @@ jobs:
 ```
 `release-mac.yml` (`on: workflow_call`) runs one job on `[self-hosted, macos-ephemeral]`
 with `environment: production`, `timeout-minutes: 90` and a non-cancelling concurrency
-group per repo. Its steps:
+group per repo.
+
+The runner controller on ralph (`Proletic/macos-runner`) gives each queued job a fresh
+Tart VM. For personal-account repos it takes jobs from private repos, and from public
+repos only if they are in the `publicRepositories` list of its `personal` source, so
+fork pull requests can't reach the machine. A public app repo must be on that list and
+must require approval for workflows from all external contributors (`apps init` sets the
+latter). Until the repo is listed its release job stays queued, and since account sources
+don't look for old queued jobs, the run has to be cancelled and re-run after listing it.
+
+Its steps:
 
 1. Check out the app repo with `fetch-depth: 0`, and check out `Moulik-Budhiraja/app-hosting`
    into `.apps-tooling` at the `tooling-ref` input, which defaults to `main`. GitHub

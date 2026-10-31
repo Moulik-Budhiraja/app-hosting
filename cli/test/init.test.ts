@@ -49,7 +49,7 @@ test("init --dry-run changes nothing and lists the plan", async () => {
     assert.match(result.stdout, /would ask for the issuer ID/);
     assert.match(result.stdout, /SUPublicEDKey  [A-Za-z0-9+/]{43}=/);
     // Only the read-only repo lookup ran.
-    assert.deepEqual(h.gh.calls.map((call) => call.args.slice(0, 2)), [["repo", "view"]]);
+    assert.deepEqual(h.gh.calls.map((call) => call.args.slice(0, 2)), [["repo", "view"], ["api", "repos/Moulik-Budhiraja/screen-draw"]]);
     assert.equal(server.tokens.length, before);
     await assert.rejects(access(join(h.dir, ".github/workflows/release.yml")));
     assert.equal((await loadConfig(h.deps.env)).appleIssuerId, undefined);
@@ -112,6 +112,40 @@ test("init sets up the environment, secrets via stdin, token and workflow", asyn
     const remaining = server.tokens.filter((item) => item.app === name);
     assert.equal(remaining.length, 1);
     assert.notEqual(remaining[0]!.id, firstId);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("init requires approval for fork pull requests on a public repo", async () => {
+  const responder = ghResponder();
+  const { h, signing } = await setup((args) => (args[0] === "api" && args[1] === "repos/me/open" ? '{"private":false}' : responder(args)));
+  try {
+    const dry = await h.run("init", "--dry-run", "--signing-dir", signing, "--repo", "me/open");
+    assert.equal(dry.code, 0, dry.stderr);
+    assert.match(dry.stdout, /require approval for workflows from every external contributor/);
+    assert.match(dry.stdout, /publicRepositories/);
+    assert.ok(!h.gh.calls.some((call) => call.args.includes("PUT")), "a dry run changes nothing");
+
+    const result = await h.run("init", "--signing-dir", signing, "--repo", "me/open", "--apple-issuer-id", "issuer-x");
+    assert.equal(result.code, 0, result.stderr);
+    const approval = h.gh.calls.find((call) => call.args.includes("repos/me/open/actions/permissions/fork-pr-contributor-approval"))!;
+    assert.deepEqual(approval.args.slice(0, 3), ["api", "-X", "PUT"]);
+    assert.deepEqual(JSON.parse(approval.options!.input!), { approval_policy: "all_external_contributors" });
+    assert.match(result.stdout, /publicRepositories/);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("init leaves fork approval alone on a private repo", async () => {
+  const responder = ghResponder();
+  const { h, signing } = await setup((args) => (args[0] === "api" && args[1] === "repos/me/closed" ? '{"private":true}' : responder(args)));
+  try {
+    const result = await h.run("init", "--signing-dir", signing, "--repo", "me/closed", "--apple-issuer-id", "issuer-x");
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(!h.gh.calls.some((call) => call.args.some((arg) => arg.includes("fork-pr-contributor-approval"))));
+    assert.doesNotMatch(result.stdout, /publicRepositories/);
   } finally {
     await h.cleanup();
   }

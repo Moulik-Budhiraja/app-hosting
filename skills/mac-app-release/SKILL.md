@@ -43,6 +43,12 @@ Each app lives on exactly one remote. Ask if it's unclear which one.
 5. **Set up GitHub.** Run `apps init --repo owner/name`. It creates the `production`
    environment (release tags only), sets every secret, and writes
    `.github/workflows/release.yml`. The repo needs a remote on GitHub first.
+   **Public repos:** `apps init` makes fork pull requests need approval before their
+   workflows run. The runner on ralph also has to allowlist the repo, or the release job
+   queues forever. Ask the user first, then add `"owner/name"` to `publicRepositories` in
+   the `personal` source of `~/Library/Application Support/gh-actions-host-controller/app/config/config.json`
+   on `ssh ralph`, and restart the controller with `pkill -f 'dist/cli.js serve'`
+   (launchd starts it again).
 6. **Dry run.** Run `DRY_RUN=1 ~/Documents/programming/app-hosting/scripts/mac/release-local.sh 0.0.1`
    from the repo on a clean commit. It builds and signs with the real Developer ID
    without notarizing or publishing. Fix what it reports.
@@ -156,6 +162,10 @@ Menu-bar or LSUIElement apps should offer "Check for Updates…" somewhere, wire
   doesn't match the app's public key. Re-run `apps init`.
 - **"Already published" notice.** That version is live (maybe from a local release),
   so the run did nothing. Bump the version.
+- **Stuck queued on a public repo.** `ssh ralph 'tail ~/Library/Logs/dev.moulik.gh-actions-controller.out.log'`
+  shows `reason: repo-not-private`. Allowlist the repo (step 5), then
+  `gh run cancel <id>` and `gh run rerun <id>`, because the controller doesn't pick up
+  jobs that were queued before.
 - **Runner down or stuck queued.** Release from a Mac with the same steps: run
   `~/Documents/programming/app-hosting/scripts/mac/release-local.sh 1.2.3` from the app repo
   on a clean commit on main. It needs `~/.config/predictor-release`, `APPLE_ISSUER_ID`
