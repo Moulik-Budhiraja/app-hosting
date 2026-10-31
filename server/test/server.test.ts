@@ -229,20 +229,85 @@ describe('apps server', () => {
   test('pages', async () => {
     const page = await fetch(`${h.base}/draw/`);
     assert.equal(page.status, 200);
-    assert.match(page.headers.get('content-security-policy') ?? '', /default-src 'none'/);
+    const csp = page.headers.get('content-security-policy') ?? '';
+    assert.match(csp, /default-src 'none'/);
+    assert.match(csp, /img-src 'self' data:/);
     const html = await page.text();
     assert.match(html, /<h1>ScreenDraw<\/h1>/);
+    assert.match(html, /<p class="meta">Version 2\.0\.0 · [A-Z][a-z]+ \d{1,2}, \d{4}<\/p>/);
     assert.match(html, /href="download"/);
     assert.match(html, /Earlier versions/);
+    assert.match(html, /class="tile"[^>]*>S</, 'no icon yet, so the initial stands in');
+    assert.doesNotMatch(html, /text-transform:uppercase/);
 
     const redirect = await fetch(`${h.base}/draw`, { redirect: 'manual' });
     assert.equal(redirect.status, 301);
     assert.equal(redirect.headers.get('location'), '/draw/');
 
     const index = await (await fetch(`${h.base}/`)).text();
-    assert.match(index, /href="draw\/">ScreenDraw/);
+    assert.match(index, /<h1>Apps<\/h1>/);
+    assert.match(index, /href="draw\/">.*<span class="name">ScreenDraw<\/span><span class="sub">Version 2\.0\.0<\/span>/);
+    assert.match(index, /<span class="name">other<\/span><span class="sub">No releases yet<\/span>/);
+    const other = await (await fetch(`${h.base}/other/`)).text();
+    assert.match(other, /No releases yet/);
+    assert.doesNotMatch(other, /href="download"/);
     assert.equal((await fetch(`${h.base}/missing/`)).status, 404);
     assert.equal((await fetch(`${h.base}/other/download`)).status, 404, 'no releases yet');
+  });
+
+  test('icons', async () => {
+    const png = (size: number, extra = 0) => {
+      const data = Buffer.alloc(33 + extra);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(data);
+      data.writeUInt32BE(13, 8);
+      data.write('IHDR', 12, 'latin1');
+      data.writeUInt32BE(size, 16);
+      data.writeUInt32BE(size, 20);
+      return data;
+    };
+    const put = (body: Buffer, token = ADMIN, app = 'draw') =>
+      fetch(`${h.base}/api/apps/${app}/icon`, { method: 'PUT', headers: { authorization: `Bearer ${token}`, 'content-type': 'image/png' }, body });
+
+    assert.equal((await fetch(`${h.base}/draw/icon.png`)).status, 404);
+    assert.equal((await put(Buffer.from('<svg></svg>'))).status, 400);
+    assert.equal((await put(png(8))).status, 400, 'too small');
+    assert.equal((await put(png(4096))).status, 400, 'too large in pixels');
+    // The server refuses an oversized body from its Content-Length and closes the
+    // connection, so the client may see the 413 or a reset while still sending.
+    const tooBig = await put(png(256, 2 << 20)).then((res) => res.status, () => 'reset');
+    assert.ok(tooBig === 413 || tooBig === 'reset', `got ${tooBig}`);
+
+    const { token } = await json(await api(h, 'POST', '/api/apps/draw/tokens', { label: 'icon' }));
+    assert.equal((await put(png(256), token, 'agent')).status, 403);
+    const icon = png(256);
+    const set = await put(icon, token);
+    assert.equal(set.status, 200);
+    const view = await json(set);
+    const version = view.icon.sha256.slice(0, 12);
+    assert.equal(view.urls.icon, `${PUBLIC_URL}/draw/icon.png?v=${version}`);
+
+    const served = await fetch(`${h.base}/draw/icon.png?v=${version}`);
+    assert.equal(served.status, 200);
+    assert.equal(served.headers.get('content-type'), 'image/png');
+    assert.match(served.headers.get('cache-control') ?? '', /immutable/);
+    assert.deepEqual(Buffer.from(await served.arrayBuffer()), icon);
+    const unversioned = await fetch(`${h.base}/draw/icon.png`);
+    assert.equal(unversioned.headers.get('cache-control'), 'no-cache');
+    const etag = unversioned.headers.get('etag') ?? '';
+    assert.equal((await raw(h, '/draw/icon.png', { 'if-none-match': etag })).status, 304);
+    assert.equal((await raw(h, '/draw/icon.png', {}, 'HEAD')).status, 200);
+
+    const page = await (await fetch(`${h.base}/draw/`)).text();
+    assert.match(page, new RegExp(`<img src="icon\\.png\\?v=${version}" alt="">`));
+    const index = await (await fetch(`${h.base}/`)).text();
+    assert.match(index, new RegExp(`<img src="draw/icon\\.png\\?v=${version}" alt="">`));
+
+    assert.equal((await api(h, 'DELETE', '/api/apps/draw/icon', undefined, token)).status, 403);
+    const removed = await api(h, 'DELETE', '/api/apps/draw/icon');
+    assert.equal(removed.status, 200);
+    assert.equal((await json(removed)).icon, undefined);
+    assert.equal((await fetch(`${h.base}/draw/icon.png`)).status, 404);
+    assert.match(await (await fetch(`${h.base}/draw/`)).text(), /class="tile"/);
   });
 
   test('range and conditional requests', async () => {

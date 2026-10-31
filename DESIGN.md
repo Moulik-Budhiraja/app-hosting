@@ -67,7 +67,7 @@ change a contract here, change every part that uses it.
 
 Environment:
 - `APPS_PUBLIC_URL`: for example `https://apps.moulik.dev`, with no trailing slash.
-- `APPS_REMOTE_NAME`: for example `moulik`. Shown on pages.
+- `APPS_REMOTE_NAME`: for example `moulik`. Used in the app list's page title and `/healthz`.
 - `APPS_ADMIN_TOKEN`: the admin bearer token, 32+ characters.
 - `APPS_DATA_DIR`: default `/data`.
 - `APPS_PORT`: default `3000`.
@@ -77,7 +77,8 @@ Environment:
 
 Data layout (`APPS_DATA_DIR`):
 ```
-apps/<app>/app.json                    {name,title,updater,sparklePublicKey?,createdAt}
+apps/<app>/app.json                    {name,title,updater,sparklePublicKey?,icon?,createdAt}
+apps/<app>/icon.png                    the app's icon, when it has one; icon in app.json is {sha256,size,updatedAt}
 apps/<app>/releases/<version>/<files>  immutable once committed
 apps/<app>/releases/<version>/release.json   written last, by rename
 tokens.json                            [{id,hash,app,label,createdAt}] publish tokens (sha256 of token)
@@ -103,8 +104,9 @@ optional for electron and must be named `<zip name>.blockmap`.
 | Route | What |
 | --- | --- |
 | `GET /healthz` | `{"ok":true,"remote":"moulik"}` |
-| `GET /` | HTML list of apps |
-| `GET /<app>/` | HTML download page: title, latest version, date, size, notes, Download button |
+| `GET /` | HTML list of apps: icon, title, latest version |
+| `GET /<app>/` | HTML download page: icon, title, latest version and date, Download button with size and minimum macOS, notes, earlier versions |
+| `GET /<app>/icon.png` | the app's icon. Pages link to `icon.png?v=<first 12 hex of its sha256>`, which is cached for good; without a matching `v` it's `no-cache` |
 | `GET /<app>/download` | 302 to the latest non-withdrawn DMG |
 | `GET /<app>/appcast.xml` | Sparkle feed (sparkle apps only), newest first |
 | `GET /<app>/latest-mac.yml` | electron-updater feed (electron apps only) |
@@ -113,6 +115,11 @@ optional for electron and must be named `<zip name>.blockmap`.
 
 Withdrawn releases leave the feeds, the download page and `/download`, but their files
 still serve. Unknown app or path returns 404.
+
+Pages follow the Paper file "app-hosting — Download pages redesign": one column, the
+system font, light and dark from `prefers-color-scheme`, and a narrow layout under 600px.
+An app without an icon gets a tile with its initial. Their CSP allows inline styles and
+images from the same origin only.
 
 Sparkle item:
 ```xml
@@ -143,8 +150,8 @@ releaseNotes: '...'
 ### API (JSON, `Authorization: Bearer <token>`)
 
 Two kinds of token: the **admin** token (env), which can do everything, and **publish**
-tokens, which are tied to one app and can only call `whoami`, `GET /api/apps/<app>` and
-the upload routes for that app. Compare tokens in constant time. Errors look like
+tokens, which are tied to one app and can only call `whoami`, `GET /api/apps/<app>`,
+`PUT /api/apps/<app>/icon` and the upload routes for that app. Compare tokens in constant time. Errors look like
 `{"error":{"code":"...","message":"..."}}` with a proper status code.
 
 | Route | Who | What |
@@ -154,6 +161,8 @@ the upload routes for that app. Compare tokens in constant time. Errors look lik
 | `POST /api/apps` | admin | `{name,title,updater,sparklePublicKey?}` → 201 app. 409 if it exists. `sparklePublicKey` (base64 of 32 raw bytes) is required for sparkle |
 | `GET /api/apps/<app>` | admin, publish(app) | `{...app, urls, releases: [...]}`, newest first, withdrawn included |
 | `PATCH /api/apps/<app>` | admin | `{title?,sparklePublicKey?}` |
+| `PUT /api/apps/<app>/icon` | admin, publish(app) | raw PNG body, at most 1 MiB and 16-2048 pixels a side → 200 app. Replaces the icon |
+| `DELETE /api/apps/<app>/icon` | admin | → 200 app |
 | `POST /api/apps/<app>/tokens` | admin | `{label}` → 201 `{id,token}`, with the token shown only this once |
 | `GET /api/apps/<app>/tokens` | admin | `[{id,label,createdAt}]` |
 | `DELETE /api/apps/<app>/tokens/<id>` | admin | 204 |
@@ -204,7 +213,8 @@ commit that already succeeded returns 409 `already_published`.
 | `apps logout <remote>` | forget the token |
 | `apps create <app> --remote <r> --updater sparkle\|electron [--title T] [--kind native\|electron]` | create the app on the remote (for sparkle: generate an Ed25519 key pair, keep the private key in the keychain, send the public key) and write `apps.json` in the current directory |
 | `apps init [--repo owner/name] [--signing-dir ~/.config/predictor-release]` | in a repo with `apps.json`: create the GitHub `production` environment, allowed only from `<tagPrefix>*` tags; set the environment secrets (below); write `.github/workflows/release.yml` if missing; for a public repo, require approval for workflows from every external contributor's fork pull request and say that the runner must allowlist the repo; print what the app must contain (Sparkle `SUFeedURL`/`SUPublicEDKey`, or electron-builder `publish: {provider: generic, url: <public>/<app>/}`) |
-| `apps publish --version X [--build N] [--notes-file f] --dmg p [--zip p] [--blockmap p] [--minimum-system-version v]` | read `apps.json`, sign the DMG for sparkle, upload with progress, commit, print the release |
+| `apps publish --version X [--build N] [--notes-file f] --dmg p [--zip p] [--blockmap p] [--minimum-system-version v] [--icon png]` | read `apps.json`, sign the DMG for sparkle, upload with progress, commit, set the icon if given (a failure there only warns), print the release |
+| `apps icon <png>` / `apps icon --remove` | set the app's icon, or remove it (admin) |
 | `apps releases [--app a --remote r]` | list releases |
 | `apps withdraw <version>` / `apps restore <version>` | admin |
 | `apps token create\|list\|revoke` | manage publish tokens for the current app |
@@ -260,7 +270,8 @@ Its steps:
    electron-builder variables set, then `notarize.sh <dmg>` if it isn't stapled.
 6. Verify with `codesign --verify --deep --strict`, `spctl --assess`, and
    `xcrun stapler validate` on the app and the DMG.
-7. `apps publish`, with `APPS_TOKEN` and `SPARKLE_PRIVATE_KEY` from secrets.
+7. `apps publish`, with `APPS_TOKEN` and `SPARKLE_PRIVATE_KEY` from secrets, and
+   `--icon` with the PNG that `scripts/mac/app-icon.sh` made from the built app.
 8. Check that the live feed reports the new version.
 9. Delete the keychain and remove the key files, `if: always()`.
 
@@ -281,5 +292,9 @@ times.
   `electron`.
 - Release output goes to `dist/apps-release/` in the app repo. That folder holds a
   `.gitignore` of `*`, so it never shows in `git status` or gets committed.
+- `scripts/mac/app-icon.sh <App.app> <out.png>` writes a 256-pixel PNG of the app's
+  icon, from the `.icns` in `CFBundleIconFile` or, for asset catalog icons
+  (`CFBundleIconName`), by asking AppKit to draw it. It writes nothing for an app with
+  no icon of its own, so the page shows the initial rather than the generic app icon.
 - `scripts/mac/release-local.sh <version>` runs the same pipeline from a Mac when the
   runner is down. `DRY_RUN=1` stops after signing.

@@ -10,7 +10,7 @@ interface StoredRelease {
   version: string; build: number; notes?: string; publishedAt: string; minimumSystemVersion?: string;
   withdrawn: boolean; edSignature?: string; files: StoredFile[];
 }
-interface StoredApp { name: string; title: string; updater: "sparkle" | "electron"; sparklePublicKey?: string; createdAt: string; releases: StoredRelease[] }
+interface StoredApp { name: string; title: string; updater: "sparkle" | "electron"; sparklePublicKey?: string; icon?: { sha256: string; size: number; updatedAt: string }; iconData?: Buffer; createdAt: string; releases: StoredRelease[] }
 interface Upload { id: string; app: string; start: Record<string, unknown>; files: Map<string, Buffer>; committed: boolean }
 
 export interface FakeServer {
@@ -110,7 +110,29 @@ export async function startFakeServer(): Promise<FakeServer> {
     if (!canUse(app.name)) return fail(res, 403, "forbidden", "Token can't use this app");
 
     if (parts.length === 3 && req.method === "GET") {
-      return send(res, 200, { ...app, releases: [...app.releases].sort((a, b) => b.build - a.build).map(publicRelease) });
+      const { iconData: _d, ...info } = app;
+      return send(res, 200, { ...info, releases: [...app.releases].sort((a, b) => b.build - a.build).map(publicRelease) });
+    }
+    if (parts[3] === "icon" && parts.length === 4) {
+      const view = () => {
+        const { releases: _r, iconData: _d, ...summary } = app;
+        return { ...summary, urls: app.icon ? { icon: `${url.origin}/${app.name}/icon.png?v=${app.icon.sha256.slice(0, 12)}` } : {} };
+      };
+      if (req.method === "PUT") {
+        const data = await readBody(req);
+        if (req.headers["content-type"] !== "image/png" || data.subarray(1, 4).toString("latin1") !== "PNG") {
+          return fail(res, 400, "invalid_icon", "The icon must be a PNG file");
+        }
+        app.iconData = data;
+        app.icon = { sha256: createHash("sha256").update(data).digest("hex"), size: data.length, updatedAt: new Date().toISOString() };
+        return send(res, 200, view());
+      }
+      if (req.method === "DELETE") {
+        if (!isAdmin) return fail(res, 403, "forbidden", "Admin only");
+        delete app.icon;
+        delete app.iconData;
+        return send(res, 200, view());
+      }
     }
     if (parts[3] === "tokens") {
       if (!isAdmin) return fail(res, 403, "forbidden", "Admin only");

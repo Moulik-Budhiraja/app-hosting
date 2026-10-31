@@ -47,7 +47,7 @@ export function sendHtml(res: ServerResponse, status: number, html: string): voi
   send(res, status, html, {
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-cache',
-    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   });
 }
 

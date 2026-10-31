@@ -5,8 +5,9 @@
 #
 #   VERSION=1.2.3 BUILD=100200300 scripts/mac/build-release.sh [apps.json] >> "$GITHUB_OUTPUT"
 #
-# Prints dmg=, zip= and blockmap= lines (paths of what to publish) and
-# minimum_system_version= (the app's LSMinimumSystemVersion, may be empty).
+# Prints dmg=, zip= and blockmap= lines (paths of what to publish),
+# minimum_system_version= (the app's LSMinimumSystemVersion, may be empty) and
+# icon= (a PNG of the app's icon for its download page, empty if it has none).
 # Nothing else goes to stdout: build, signing and notary output goes to stderr.
 #
 # Env: VERSION, BUILD; APPS_KEYCHAIN, APPS_SIGN_IDENTITY, APPS_SIGN_NAME and
@@ -51,6 +52,15 @@ minimum_system_version() {
   /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$1/Contents/Info.plist" 2>/dev/null || true
 }
 
+# The download page shows the icon, but a release never fails over it.
+icon_png() {
+  local png="$out_dir/icon.png"
+  rm -f "$png"
+  if "$here/app-icon.sh" "$1" "$png"; then
+    printf '%s' "$png"
+  fi
+}
+
 out_dir="dist/apps-release"
 mkdir -p "$out_dir"
 # Ignore the output without touching the app's .gitignore, so the tree stays
@@ -84,6 +94,7 @@ if [[ $kind == native ]]; then
   echo "zip=" >&3
   echo "blockmap=" >&3
   echo "minimum_system_version=$(minimum_system_version "$app")" >&3
+  echo "icon=$(icon_png "$app")" >&3
   exit 0
 fi
 
@@ -137,3 +148,4 @@ echo "dmg=$dmg" >&3
 echo "zip=$zip" >&3
 echo "blockmap=$blockmap" >&3
 echo "minimum_system_version=$(minimum_system_version "$zipped_app")" >&3
+echo "icon=$(icon_png "$zipped_app")" >&3

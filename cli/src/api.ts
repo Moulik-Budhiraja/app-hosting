@@ -19,11 +19,19 @@ export interface Release {
   files: ReleaseFile[];
 }
 
+export interface AppIcon {
+  sha256: string;
+  size: number;
+  updatedAt: string;
+}
+
 export interface AppInfo {
   name: string;
   title: string;
   updater: "sparkle" | "electron";
   sparklePublicKey?: string;
+  icon?: AppIcon;
+  urls?: { page: string; download: string; feed: string; updateBase: string; icon?: string };
   createdAt?: string;
   releases?: Release[];
   latest?: Release | null;
@@ -80,7 +88,7 @@ export class ApiClient {
     return `${this.baseUrl}${path}`;
   }
 
-  private async send(method: string, path: string, body?: unknown, auth = true): Promise<Response> {
+  private async send(method: string, path: string, body?: unknown, auth = true, png?: Buffer): Promise<Response> {
     const headers: Record<string, string> = { accept: "application/json" };
     if (auth) {
       if (!this.token) {
@@ -93,11 +101,12 @@ export class ApiClient {
       headers.authorization = `Bearer ${this.token}`;
     }
     if (body !== undefined) headers["content-type"] = "application/json";
+    if (png) headers["content-type"] = "image/png";
     try {
       return await this.fetchImpl(this.url(path), {
         method,
         headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: png ? new Uint8Array(png) : body === undefined ? undefined : JSON.stringify(body),
         redirect: "manual",
       });
     } catch (error) {
@@ -166,6 +175,17 @@ export class ApiClient {
 
   revokeToken(app: string, id: string): Promise<void> {
     return this.json("DELETE", `/api/apps/${encodeURIComponent(app)}/tokens/${encodeURIComponent(id)}`);
+  }
+
+  /** Replaces the app's icon. Publish tokens for the app may do this. */
+  async setIcon(app: string, png: Buffer): Promise<AppInfo> {
+    const response = await this.send("PUT", `/api/apps/${encodeURIComponent(app)}/icon`, undefined, true, png);
+    if (!response.ok) throw await this.errorFrom(response);
+    return (await response.json()) as AppInfo;
+  }
+
+  removeIcon(app: string): Promise<AppInfo> {
+    return this.json("DELETE", `/api/apps/${encodeURIComponent(app)}/icon`);
   }
 
   setWithdrawn(app: string, version: string, withdrawn: boolean): Promise<Release> {

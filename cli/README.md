@@ -65,7 +65,8 @@ apps publish --version 0.5.0 --dmg dist/App.dmg --zip dist/App-0.5.0-mac.zip --b
 
 The build number defaults to the version's scheme (`apps build-number 1.2.3` prints
 100200300). Override it with `--build`. In CI, `APPS_TOKEN` and `SPARKLE_PRIVATE_KEY`
-replace the keychain.
+replace the keychain. `--icon icon.png` also updates the icon on the download page; the
+release workflow passes the built app's icon automatically.
 
 ## Other commands
 
@@ -75,7 +76,11 @@ apps releases                  # or: apps releases --app screen-draw --remote mo
 apps withdraw 1.2.0            # take a bad release out of the feed (admin)
 apps restore 1.2.0
 apps token create|list|revoke  # publish tokens for this app (admin)
+apps icon icon.png             # set the download page's icon; apps icon --remove drops it (admin)
 ```
+
+To set an icon from an app you already have, make a PNG of it first:
+`scripts/mac/app-icon.sh /Applications/MyApp.app icon.png && apps icon icon.png`.
 
 Every command accepts `--json` for script-safe output and `-C <dir>` to run against
 another repo.

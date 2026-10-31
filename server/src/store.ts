@@ -7,11 +7,19 @@ import { compareVersions, isVersion } from './versions.ts';
 export type Updater = 'sparkle' | 'electron';
 export type Role = 'dmg' | 'zip' | 'blockmap';
 
+export interface AppIcon {
+  /** sha256 of icon.png, hex. Also versions the icon's URL. */
+  sha256: string;
+  size: number;
+  updatedAt: string;
+}
+
 export interface AppRecord {
   name: string;
   title: string;
   updater: Updater;
   sparklePublicKey?: string;
+  icon?: AppIcon;
   createdAt: string;
 }
 
@@ -95,6 +103,10 @@ export class Store {
 
   appDir(app: string): string {
     return path.join(this.dataDir, 'apps', app);
+  }
+
+  iconFile(app: string): string {
+    return path.join(this.appDir(app), 'icon.png');
   }
 
   releaseDir(app: string, version: string): string {

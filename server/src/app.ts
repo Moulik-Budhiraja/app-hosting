@@ -1,3 +1,4 @@
+import { promises as fs } from 'node:fs';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import path from 'node:path';
@@ -6,6 +7,7 @@ import type { Principal } from './auth.ts';
 import type { Config } from './config.ts';
 import { electronLatestMac, fileWithRole, liveReleases, releasePath, sparkleAppcast } from './feeds.ts';
 import { serveReleaseFile } from './files.ts';
+import { iconVersion, removeIcon, setIcon } from './icons.ts';
 import { HttpError, badRequest, isObject, notFound, readJson, redirect, send, sendError, sendHtml, sendJson, sendNoContent, splitPath } from './http.ts';
 import { appPage, indexPage } from './pages.ts';
 import { isSparklePublicKey } from './sparkle.ts';
@@ -80,10 +82,10 @@ async function handle(config: Config, store: Store, req: IncomingMessage, res: S
     const rows = await Promise.all(apps.map(async (app) => ({ app, latest: liveReleases(await store.listReleases(app.name))[0] })));
     return sendHtml(res, 200, indexPage(config.remoteName, rows));
   }
-  return publicApp(config, store, req, res, segments);
+  return publicApp(config, store, req, res, segments, url.searchParams);
 }
 
-async function publicApp(config: Config, store: Store, req: IncomingMessage, res: ServerResponse, segments: string[]): Promise<void> {
+async function publicApp(config: Config, store: Store, req: IncomingMessage, res: ServerResponse, segments: string[], query: URLSearchParams): Promise<void> {
   const [name, ...rest] = segments;
   const app = await store.getApp(name ?? '');
   if (!app) throw notFound();
@@ -92,6 +94,29 @@ async function publicApp(config: Config, store: Store, req: IncomingMessage, res
 
   if (rest.length === 0) return redirect(res, 301, `/${app.name}/`);
   if (route === '') return sendHtml(res, 200, appPage(config.remoteName, app, releases));
+
+  if (route === 'icon.png') {
+    if (!app.icon) throw notFound(`${app.title} has no icon`);
+    const etag = `"${app.icon.sha256.slice(0, 32)}"`;
+    const headers = {
+      'content-type': 'image/png',
+      // Pages link to icon.png?v=<hash>, so a matching ?v can be cached for good.
+      'cache-control': query.get('v') === iconVersion(app) ? 'public, max-age=31536000, immutable' : 'no-cache',
+      etag,
+    };
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, headers);
+      res.end();
+      return;
+    }
+    const data = await fs.readFile(store.iconFile(app.name));
+    if (req.method === 'HEAD') {
+      res.writeHead(200, { ...headers, 'content-length': data.length, 'x-content-type-options': 'nosniff' });
+      res.end();
+      return;
+    }
+    return send(res, 200, data, headers);
+  }
 
   if (route === 'download') {
     const latest = liveReleases(releases)[0];
@@ -151,6 +176,7 @@ function appView(config: Config, app: AppRecord) {
       download: `${base}download`,
       feed: base + (app.updater === 'sparkle' ? 'appcast.xml' : 'latest-mac.yml'),
       updateBase: base,
+      ...(app.icon ? { icon: `${base}icon.png?v=${iconVersion(app)}` } : {}),
     },
   };
 }
@@ -212,6 +238,16 @@ async function api(config: Config, store: Store, req: IncomingMessage, res: Serv
   }
 
   const app = await requireExistingApp(store, appName);
+
+  // /api/apps/<app>/icon
+  if (second === 'icon' && segments.length === 3) {
+    if (method === 'DELETE') {
+      requireAdmin(principal);
+      return sendJson(res, 200, appView(config, await removeIcon(store, app)));
+    }
+    expect(req, 'PUT');
+    return sendJson(res, 200, appView(config, await setIcon(store, app, req)));
+  }
 
   // /api/apps/<app>/tokens[/<id>]
   if (second === 'tokens') {

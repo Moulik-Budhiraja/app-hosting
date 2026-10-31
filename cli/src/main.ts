@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs, type ParseArgsConfig } from "node:util";
-import { buildNumberCommand, releasesCommand, statusCommand, tokenCommand, withdrawCommand } from "./commands/manage.js";
+import { buildNumberCommand, iconCommand, releasesCommand, statusCommand, tokenCommand, withdrawCommand } from "./commands/manage.js";
 import { publishCommand } from "./commands/publish.js";
 import { loginCommand, logoutCommand, remoteCommand } from "./commands/remote.js";
 import { createCommand, initCommand } from "./commands/setup.js";
@@ -28,7 +28,8 @@ Setting up an app (run in the app's repo):
 
 Releasing:
   apps publish --version X.Y.Z --dmg <path> [--zip <path>] [--blockmap <path>]
-               [--build N] [--notes-file <path>] [--minimum-system-version 13.0]
+               [--build N] [--notes-file <path>] [--minimum-system-version 13.0] [--icon <png>]
+  apps icon <icon.png>             Set the icon on the app's download page (--remove to drop it, admin)
   apps status [--expect X.Y.Z]     Latest release and whether the live feed matches
   apps releases [--app a --remote r]
   apps withdraw <version>          Take a release out of the feed (admin)
@@ -78,12 +79,14 @@ const COMMAND_OPTIONS = {
     zip: { type: "string" },
     blockmap: { type: "string" },
     "minimum-system-version": { type: "string" },
+    icon: { type: "string" },
   },
   status: { expect: { type: "string" } },
   releases: TARGET,
   withdraw: TARGET,
   restore: TARGET,
   token: { ...TARGET, label: { type: "string" } },
+  icon: { ...TARGET, remove: { type: "boolean" } },
   "build-number": {},
 } as const satisfies Record<string, ParseArgsConfig["options"]>;
 
@@ -177,6 +180,7 @@ export async function run(argv: string[], deps: Deps): Promise<number> {
           zip: str("zip"),
           blockmap: str("blockmap"),
           minimumSystemVersion: str("minimum-system-version"),
+          icon: str("icon"),
         });
         break;
       case "status":
@@ -192,6 +196,9 @@ export async function run(argv: string[], deps: Deps): Promise<number> {
         break;
       case "token":
         await tokenCommand(deps, out, positionals, { dir, app: str("app"), remote: str("remote"), label: str("label") });
+        break;
+      case "icon":
+        await iconCommand(deps, out, positionals, { dir, app: str("app"), remote: str("remote"), remove: Boolean(v.remove) });
         break;
       case "build-number":
         buildNumberCommand(out, positionals);

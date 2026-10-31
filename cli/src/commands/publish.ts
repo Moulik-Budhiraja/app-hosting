@@ -4,6 +4,7 @@ import { ApiError, type UploadStart } from "../api.js";
 import { readAppFile } from "../appfile.js";
 import { client, formatBytes, type Deps, type Out } from "../context.js";
 import { CliError, EXIT, usage } from "../errors.js";
+import { readIcon } from "../icon.js";
 import { SPARKLE_SERVICE, sparkleAccount } from "../secrets.js";
 import { publicKeyFor, signArchive } from "../sparkle.js";
 import { digestFile, putFile } from "../upload.js";
@@ -21,6 +22,7 @@ export interface PublishOptions {
   zip?: string;
   blockmap?: string;
   minimumSystemVersion?: string;
+  icon?: string;
 }
 
 interface LocalFile {
@@ -68,6 +70,7 @@ export async function publishCommand(deps: Deps, out: Out, options: PublishOptio
   if (options.blockmap && !options.zip) throw usage("--blockmap goes with --zip.");
 
   const notes = options.notesFile ? await readFile(resolve(options.dir, options.notesFile), "utf8") : undefined;
+  const icon = options.icon ? await readIcon(options.dir, options.icon) : undefined;
 
   const inputs: { path: string; role: LocalFile["role"] }[] = [{ path: options.dmg, role: "dmg" }];
   if (options.zip) inputs.push({ path: options.zip, role: "zip" });
@@ -153,6 +156,18 @@ export async function publishCommand(deps: Deps, out: Out, options: PublishOptio
   }
 
   const release = await api.commitUpload(file.app, upload.uploadId);
+
+  // The release is already out, so a failed icon update only warns.
+  let iconUpdated = false;
+  if (icon) {
+    try {
+      await api.setIcon(file.app, icon);
+      iconUpdated = true;
+    } catch (error) {
+      out.warn(`${release.version} is published, but its icon wasn't updated: ${(error as Error).message}`);
+    }
+  }
+
   const feed = feedUrl(file);
   out.result(
     [
@@ -160,6 +175,6 @@ export async function publishCommand(deps: Deps, out: Out, options: PublishOptio
       `  Feed:     ${feed}`,
       `  Download: ${file.remote.url}/${file.app}/`,
     ],
-    { app: file.app, remote: file.remote.name, feed, release },
+    { app: file.app, remote: file.remote.name, feed, release, iconUpdated },
   );
 }

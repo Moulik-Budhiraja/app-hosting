@@ -176,6 +176,7 @@ jobs:
           ZIP: ${{ steps.build.outputs.zip }}
           BLOCKMAP: ${{ steps.build.outputs.blockmap }}
           MINIMUM_SYSTEM_VERSION: ${{ steps.build.outputs.minimum_system_version }}
+          ICON: ${{ steps.build.outputs.icon }}
           NOTES_FILE: ${{ steps.notes.outputs.file }}
         run: |
           [[ -n $APPS_TOKEN ]] || { echo "APPS_TOKEN isn't set on the production environment; run \`apps init\`" >&2; exit 1; }
@@ -183,6 +184,7 @@ jobs:
           [[ -n $ZIP ]] && args+=(--zip "$ZIP")
           [[ -n $BLOCKMAP ]] && args+=(--blockmap "$BLOCKMAP")
           [[ -n $MINIMUM_SYSTEM_VERSION ]] && args+=(--minimum-system-version "$MINIMUM_SYSTEM_VERSION")
+          [[ -n $ICON ]] && args+=(--icon "$ICON")
           [[ -n $NOTES_FILE ]] && args+=(--notes-file "$NOTES_FILE")
           node "$TOOLING/cli/dist/index.js" "${args[@]}"
 

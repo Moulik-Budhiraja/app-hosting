@@ -203,6 +203,52 @@ test("electron app: create, publish with zip and blockmap", async () => {
   }
 });
 
+test("icons: publish --icon, apps icon, apps icon --remove", async () => {
+  const h = await loggedIn();
+  const png = (size: number) => {
+    const data = Buffer.alloc(64);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(data);
+    data.writeUInt32BE(13, 8);
+    data.write("IHDR", 12, "latin1");
+    data.writeUInt32BE(size, 16);
+    data.writeUInt32BE(size, 20);
+    return data;
+  };
+  try {
+    assert.equal((await h.run("create", "iconic", "--remote", "moulik", "--updater", "sparkle", "--title", "Iconic")).code, 0);
+    await writeFile(join(h.dir, "Iconic-1.0.0.dmg"), Buffer.alloc(2000, 1));
+    await writeFile(join(h.dir, "icon.png"), png(256));
+    await writeFile(join(h.dir, "tiny.png"), png(8));
+    await writeFile(join(h.dir, "fake.png"), "<svg/>");
+
+    // A bad icon stops publish before anything is uploaded.
+    const before = server.requests.length;
+    const bad = await h.run("publish", "--version", "1.0.0", "--dmg", "Iconic-1.0.0.dmg", "--icon", "fake.png");
+    assert.equal(bad.code, 2);
+    assert.match(bad.stderr, /isn't a PNG/);
+    assert.ok(!server.requests.slice(before).some((line) => line.includes("/uploads")));
+    const app = await h.run("publish", "--version", "1.0.0", "--dmg", "Iconic-1.0.0.dmg", "--icon", "Some.app");
+    assert.match(app.stderr, /app-icon\.sh/);
+
+    const published = await h.run("publish", "--version", "1.0.0", "--dmg", "Iconic-1.0.0.dmg", "--icon", "icon.png", "--json");
+    assert.equal(published.code, 0, published.stderr);
+    assert.equal(JSON.parse(published.stdout).iconUpdated, true);
+    assert.deepEqual(server.apps.get("iconic")!.iconData, png(256));
+
+    assert.equal((await h.run("icon", "tiny.png")).code, 2);
+    const set = await h.run("icon", "icon.png", "--json");
+    assert.equal(set.code, 0, set.stderr);
+    assert.match(JSON.parse(set.stdout).url, /\/iconic\/icon\.png\?v=[0-9a-f]{12}$/);
+
+    assert.equal((await h.run("icon")).code, 2);
+    const removed = await h.run("icon", "--remove");
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.equal(server.apps.get("iconic")!.icon, undefined);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("tokens: create, list, revoke", async () => {
   const h = await loggedIn();
   try {

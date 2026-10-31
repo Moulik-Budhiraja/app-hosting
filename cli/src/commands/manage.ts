@@ -3,6 +3,7 @@ import { checkAppName, readAppFile, type Updater } from "../appfile.js";
 import { getRemote, loadConfig } from "../config.js";
 import { client, formatBytes, formatDate, requireAdmin, table, type Deps, type Out } from "../context.js";
 import { CliError, EXIT, usage } from "../errors.js";
+import { readIcon } from "../icon.js";
 import { defaultBuild, parseVersion } from "../version.js";
 
 interface Target {
@@ -115,6 +116,33 @@ export async function tokenCommand(
     return;
   }
   throw usage("Usage: apps token create|list|revoke");
+}
+
+export async function iconCommand(
+  deps: Deps,
+  out: Out,
+  positionals: string[],
+  options: { dir: string; app?: string; remote?: string; remove: boolean },
+): Promise<void> {
+  if (options.remove ? positionals.length !== 0 : positionals.length !== 1) {
+    throw usage("Usage: apps icon <icon.png> | apps icon --remove");
+  }
+  const where = await target(deps, options);
+  const api = await client(deps, where.remote, where.url);
+  if (options.remove) {
+    await requireAdmin(deps, api);
+    await api.removeIcon(where.app);
+    out.result(`Removed ${where.app}'s icon. Its page shows its initial again.`, { app: where.app, remote: where.remote, icon: null });
+    return;
+  }
+  const png = await readIcon(options.dir, positionals[0]!);
+  const app = await api.setIcon(where.app, png);
+  out.result(`Set ${where.app}'s icon (${formatBytes(png.length)}). It shows on ${where.url}/${where.app}/`, {
+    app: where.app,
+    remote: where.remote,
+    icon: app.icon ?? null,
+    url: app.urls?.icon ?? null,
+  });
 }
 
 export function feedVersion(updater: Updater, text: string): string | null {

@@ -14,7 +14,9 @@ How a release works: you push a tag `v1.2.3` on main. The app's
 `.github/workflows/release.yml` then calls `release-mac.yml`, which runs on the
 `macos-ephemeral` runner. It builds the app, signs it with the Developer ID,
 notarizes the app and the DMG, and runs `apps publish`. The remote serves:
-- `<remote>/<app>/`: the download page
+- `<remote>/<app>/`: the download page, with the app's icon. The workflow takes the
+  icon from the built app (`CFBundleIconFile` or `CFBundleIconName`), so give the app a
+  real icon; without one the page shows its initial.
 - `/download`: the latest DMG
 - `/appcast.xml` (Sparkle) or `/latest-mac.yml` (electron-updater)
 
@@ -147,6 +149,8 @@ Menu-bar or LSUIElement apps should offer "Check for Updates…" somewhere, wire
 - `apps restore 1.2.3`: undo a withdraw.
 - `apps token create|list|revoke`: CI publish tokens. Re-run `apps init` to rotate the
   token in GitHub.
+- `apps icon icon.png`: set the download page's icon without a release. Make the PNG
+  from an app with `scripts/mac/app-icon.sh <App.app> icon.png`.
 
 ## When something breaks
 
