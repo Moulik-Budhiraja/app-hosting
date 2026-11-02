@@ -1,54 +1,48 @@
 // Runs a release build with the app's build secrets added to its environment.
-// actions/release-mac and actions/release-windows call it when the caller passes
-// the build-secrets input (see DESIGN.md):
+// actions/release-mac and actions/release-windows call it when the caller
+// passes build-env (or the deprecated build-secrets with the secrets JSON):
 //
 //   node scripts/common/with-build-secrets.mjs <command> [args...]
 //
-// Env: APPS_BUILD_SECRETS, the secret names from the input, separated by
-// spaces, commas or newlines; APPS_SECRETS_JSON, the workflow's
-// secrets as JSON. The command gets each listed secret as an environment
-// variable of the same name, and gets neither of those two variables, so the
-// build never sees the other secrets. Secret values are never printed.
+// Env:
+//   APPS_BUILD_ENV       NAME=value lines, or NAME<<DELIMITER blocks for values
+//                        with several lines (see build-env.mjs)
+//   APPS_BUILD_SECRETS   deprecated: secret names, separated by spaces, commas
+//                        or newlines, looked up in
+//   APPS_SECRETS_JSON    deprecated: the workflow's secrets as JSON
+// The command gets each variable under its own name and none of those three,
+// so the build never sees anything else. Values are never printed.
 import { spawn } from 'node:child_process';
+import { NAME_RE, parseBuildEnv, selectSecrets } from './build-env.mjs';
 
-const CONTROL = ['APPS_BUILD_SECRETS', 'APPS_SECRETS_JSON'];
+const CONTROL = ['APPS_BUILD_ENV', 'APPS_BUILD_SECRETS', 'APPS_SECRETS_JSON'];
 const fail = (message) => { console.error(`error: build-secrets: ${message}`); process.exit(1); };
 
 const [command, ...args] = process.argv.slice(2);
 if (!command) fail('no command to run');
 
-const names = [...new Set((process.env.APPS_BUILD_SECRETS ?? '').split(/[\s,]+/).filter(Boolean))];
-let secrets;
-try {
-  secrets = JSON.parse(process.env.APPS_SECRETS_JSON || '{}');
-} catch {
-  // The parser's message can quote part of the input, so it isn't shown.
-  fail("couldn't parse the workflow's secrets");
-}
-if (!secrets || typeof secrets !== 'object') fail("couldn't parse the workflow's secrets");
+// Environment variables are case-insensitive on Windows, so compare that way everywhere.
+const taken = Object.keys(process.env).filter((k) => !CONTROL.includes(k.toUpperCase())).map((k) => k.toUpperCase());
+const clash = (name) => `${name} would replace a variable the build step already sets`;
 
-// Secret names are case-insensitive on GitHub, and so are environment
-// variables on Windows.
-const lookup = (object, name) => {
-  const key = Object.keys(object).find((k) => k.toUpperCase() === name.toUpperCase());
-  return key === undefined ? undefined : object[key];
-};
-const taken = Object.keys(process.env).filter((k) => !CONTROL.includes(k.toUpperCase()));
-
+const fromEnv = parseBuildEnv(process.env.APPS_BUILD_ENV);
+const problems = [...fromEnv.problems];
+// A name that clashes is reported as that, not looked up.
+const legacyNames = (process.env.APPS_BUILD_SECRETS ?? '').split(/[\s,]+/).filter(Boolean);
+for (const name of legacyNames) if (NAME_RE.test(name) && taken.includes(name.toUpperCase())) problems.push(clash(name));
+const lookUp = legacyNames.filter((name) => !(NAME_RE.test(name) && taken.includes(name.toUpperCase())));
+const fromSecrets = lookUp.length ? selectSecrets(lookUp.join(' '), process.env.APPS_SECRETS_JSON) : { entries: [], problems: [] };
+problems.push(...fromSecrets.problems);
 const added = {};
-const problems = [];
-for (const name of names) {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+for (const [name, value] of [...fromEnv.entries, ...fromSecrets.entries]) {
+  if (!NAME_RE.test(name)) {
     problems.push(`"${name}" isn't a valid secret name`);
-  } else if (taken.some((k) => k.toUpperCase() === name.toUpperCase())) {
-    problems.push(`${name} would replace a variable the build step already sets`);
+  } else if (taken.includes(name.toUpperCase())) {
+    problems.push(clash(name));
+  } else if (Object.keys(added).some((k) => k.toUpperCase() === name.toUpperCase())) {
+    problems.push(`${name} comes from both build-env and build-secrets`);
   } else {
-    const value = lookup(secrets, name);
-    if (typeof value !== 'string' || value === '') {
-      problems.push(`${name} isn't set: add it to the repo's production environment and pass the secrets in (secrets: inherit to the reusable workflow, or the secrets input of the action)`);
-    } else {
-      added[name] = value;
-    }
+    added[name] = value;
   }
 }
 if (problems.length) fail(problems.join('\n  '));

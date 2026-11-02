@@ -111,10 +111,35 @@ jobs:
           path: .apps-tooling
           persist-credentials: false
 
+      - uses: actions/setup-node@v4
+        if: inputs.build-secrets != ''
+        with:
+          node-version: 24
+
+      # build-secrets names secrets that came with secrets: inherit. Turn them
+      # into build-env lines here, so the action gets only those secrets.
+      - name: Pick the build secrets
+        id: build-env
+        if: inputs.build-secrets != ''
+        shell: bash
+        env:
+          APPS_BUILD_SECRETS: ${{ inputs.build-secrets }}
+          APPS_SECRETS_JSON: ${{ toJSON(secrets) }}
+        run: |
+          node .apps-tooling/scripts/common/build-env.mjs from-secrets >> "$GITHUB_OUTPUT"
+
       - name: Build, sign and publish
         uses: ./.apps-tooling/actions/release-windows
         with:
           checkout: 'false'
           directory: ${{ inputs.directory }}
-          build-secrets: ${{ inputs.build-secrets }}
-          secrets: ${{ toJSON(secrets) }}
+          apps-token: ${{ secrets.APPS_TOKEN }}
+          sparkle-private-key: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          azure-signing-endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          azure-signing-account: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          azure-signing-profile: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          azure-signing-publisher: ${{ secrets.AZURE_SIGNING_PUBLISHER }}
+          build-env: ${{ steps.build-env.outputs.build_env }}

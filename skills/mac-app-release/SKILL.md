@@ -27,8 +27,8 @@ and `apps init` writes the right form:
   must run the actions in their own jobs. `secrets: inherit` doesn't pass secrets to
   another owner's reusable workflow, and neither do environment secrets: the called job
   gets only `github_token`. The job declares `runs-on`, `environment: production`,
-  `timeout-minutes: 90` and its concurrency group, and passes
-  `secrets: ${{ toJSON(secrets) }}` to the action:
+  `timeout-minutes: 90` and its concurrency group, and passes each secret the action
+  uses as its own input, so the action never sees the repo's other secrets:
   ```yaml
   windows:
     runs-on: [self-hosted, windows]
@@ -40,15 +40,27 @@ and `apps init` writes the right form:
     steps:
       - uses: Moulik-Budhiraja/app-hosting/actions/release-windows@main
         with:
-          secrets: ${{ toJSON(secrets) }}
+          apps-token: ${{ secrets.APPS_TOKEN }}
+          sparkle-private-key: ${{ secrets.SPARKLE_PRIVATE_KEY }}   # Sparkle apps only
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          azure-signing-endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          azure-signing-account: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          azure-signing-profile: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          azure-signing-publisher: ${{ secrets.AZURE_SIGNING_PUBLISHER }}
   ```
-  The Mac job is the same with `runs-on: [self-hosted, macos-ephemeral]` and
-  `actions/release-mac`. The action reads only the release secrets and the names in
-  `build-secrets` from that JSON.
+  The Mac job uses `runs-on: [self-hosted, macos-ephemeral]`, `actions/release-mac`,
+  and `apple-certificate-base64`, `apple-certificate-password`, `apple-api-key-base64`,
+  `apple-key-id` and `apple-issuer-id` in place of the `azure-*` inputs. Never pass
+  `${{ toJSON(secrets) }}`: the old `secrets` input still works with a deprecation
+  warning, but it hands the action every secret, and GitHub's malicious-workflow check
+  held a run that did it.
 
-The `directory` and `build-secrets` inputs work the same in both forms. `tooling-ref`
-and `runs-on` are reusable-workflow inputs. With the actions, the ref after `@` picks
-the tooling and the job sets `runs-on`.
+`directory` works the same in both forms. Build secrets go in `build-secrets` (names)
+on the reusable workflows and in `build-env` (values) on the actions; see "Build-time
+secrets" below. `tooling-ref` and `runs-on` are reusable-workflow inputs. With the
+actions, the ref after `@` picks the tooling and the job sets `runs-on`.
 
 The jobs publish on their own into the same release, so a failed Windows build doesn't
 hold back the Mac one; re-run it and it joins the release. The remote serves:
@@ -191,16 +203,28 @@ electron-builder 26 notes, from release runs on the Windows pool. They apply on 
   `--config electron-builder.config.js`. Without it the build is unsigned and uses the
   default artifact name, so the paths in `apps.json` don't match.
 
+Tag prefixes: `tagPrefix` can be a list, such as `["v", "win-v"]`. A tag matching any of them
+releases, and the longest prefix the tag starts with gives the version, so `v0.7.28` and
+`win-v0.7.28` both mean 0.7.28. To keep a platform-only prefix, split `release.yml`:
+the Mac workflow triggers on `v*`, the Windows one on `v*` and `win-v*`. Then `v1.2.3`
+releases both platforms from one commit with the same version, and `win-v1.2.3` releases
+Windows only. `apps init` adds an environment tag rule for every prefix.
+
 Monorepo: set `"tagPrefix": "app/v"` and tag `app/v1.2.3`. If `apps.json` isn't at the
 repo root, pass `with: { directory: path }` to each job in `release.yml` (to the action's
 step in the composite-action form).
 
 Build-time secrets: if `command` needs a secret, such as an OAuth client file the app
-bundles, put it in the repo's `production` environment and list it in `release.yml`
-with `with: { build-secrets: GOOGLE_OAUTH_CLIENT_BASE64 }`. Separate several names with
-spaces or commas, and pass the input on each platform's job that needs it. The build
-step gets each one as an environment variable of the same name and never sees the other
-secrets. The run fails before building if a listed secret isn't set, or if a name would
+bundles, put it in the repo's `production` environment and pass it on each platform's
+job that needs it:
+- Reusable workflows: `with: { build-secrets: GOOGLE_OAUTH_CLIENT_BASE64 }`, names
+  separated by spaces or commas.
+- Actions: `build-env`, one `NAME=${{ secrets.NAME }}` line each. A value that can hold
+  a newline needs the `NAME<<DELIMITER` form: that line, the value, then a line holding
+  only `DELIMITER`.
+
+The build step gets each one as an environment variable of the same name and never sees
+the other secrets. The run fails before building if a listed secret isn't set, or if a name would
 replace a variable the workflow sets (`VERSION`, `BUILD`, `AZURE_*`, `APPLE_*`). For
 `release-local.sh`, export the variables in the shell first.
 
@@ -324,13 +348,15 @@ installer, so the installer must close the running app (or the app must quit thr
 - **Windows signing fails with 403 or "no credential".** Check the `AZURE_*` secrets,
   that the client secret hasn't expired, and that the app registration has the signer
   role on the account. Missing `.NET 8` means the setup-dotnet step didn't run.
-- **"build-secrets: X isn't set".** The secret is missing from the repo's `production`
-  environment and repo secrets, or `release.yml` doesn't pass the secrets in
-  (`secrets: inherit`, or `secrets: ${{ toJSON(secrets) }}` to the action).
+- **"build-secrets: X isn't set" or "build-env gives X an empty value".** The secret is
+  missing from the repo's `production` environment, or `release.yml` doesn't pass it
+  (`secrets: inherit` for the reusable workflows, the `build-env` line for the action).
+- **"build-env line N isn't NAME=value".** A multi-line secret is in the `NAME=value`
+  form. Use `NAME<<DELIMITER`.
 - **"APPS_TOKEN didn't reach the release job", or every secret empty.** A repo owned by
   another account than `Moulik-Budhiraja` is calling the reusable workflow, which gets
   no secrets across owners. Switch `release.yml` to the composite-action form above.
-  In that form, check the job has `environment: production` and the `secrets` input.
+  In that form, check the job has `environment: production` and passes `apps-token`.
 - **"isn't signed" for an Electron installer.** The command doesn't pass
   `--config electron-builder.config.js`, or `win.azureSignOptions` is missing or doesn't
   read the `AZURE_SIGNING_*` variables. A wrong artifact name has the same first cause.

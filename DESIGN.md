@@ -18,7 +18,8 @@ you change a contract here, change every part that uses it.
   steps for one platform, run on a release tag. Apps owned by other accounts call them
   from their own jobs. `.github/workflows/release-mac.yml` and `release-windows.yml` are
   reusable workflows that wrap them for apps under `Moulik-Budhiraja`. They use `scripts/common/`
-  (`read-config.mjs` and its `read-config.sh` wrapper, `check-tag.sh`, `published.sh`),
+  (`read-config.mjs` and its `read-config.sh` wrapper, `check-tag.sh`, `published.sh`,
+  `build-env.mjs`, `with-build-secrets.mjs`),
   `scripts/mac/*.sh` and `scripts/windows/*.ps1`.
 - `skills/mac-app-release/SKILL.md`: tells agents to use all of the above instead of
   building release setups by hand. It covers Windows too, despite the name.
@@ -73,7 +74,14 @@ you change a contract here, change every part that uses it.
   `build` object, still reads as `builds.mac`. A file can't have both `build` and
   `builds`. Tools that write `apps.json` write `builds`.
 - `tagPrefix` defaults to `"v"`. A monorepo can use `"app/v"`, in which case the tag
-  `app/v1.2.3` releases 1.2.3. One tag releases every platform in `builds`.
+  `app/v1.2.3` releases 1.2.3. It can also be a list, such as `["v", "win-v"]`: a tag
+  matching any of them releases, and the longest prefix the tag starts with gives the
+  version, so `win-v0.7.27` and `v0.7.27` both release 0.7.27. A plain string works as
+  before. Which platforms a tag releases is up to `release.yml`: `apps init` triggers
+  every job on every prefix, and an app that wants `win-v*` to release Windows only
+  splits its jobs into workflows with their own `tags:`, such as `release-mac.yml` on
+  `v*` and `release-windows.yml` on `v*` and `win-v*`. Both platforms built from the
+  same `v` tag share the version and build number, so they join one release.
 - A `native` build must use `sparkle`, and an `electron` build must use `electron`, on
   both platforms.
 - Paths stay inside the repo: no leading `/` or `~`, and no `..`. Artifact paths can use
@@ -413,7 +421,7 @@ Re-running a commit that already succeeded returns 409 `already_published`.
 | `apps login <remote> [--token-stdin]` | prompt for the admin token (hidden), check it with `whoami`, store it |
 | `apps logout <remote>` | forget the token |
 | `apps create <app> --remote <r> --updater sparkle\|electron [--title T] [--kind native\|electron] [--platforms mac,windows]` | create the app on the remote (for sparkle: generate an Ed25519 key pair, keep the private key in the keychain, send the public key) and write `apps.json` with a default build for each platform. `--platforms` defaults to `mac` |
-| `apps init [--repo owner/name] [--signing-dir ~/.config/predictor-release]` | in a repo with `apps.json`: create the GitHub `production` environment, allowed only from `<tagPrefix>*` tags; set the environment secrets (below) for the platforms in `builds`; write `.github/workflows/release.yml` if missing (calling the reusable workflows when the repo's owner is `Moulik-Budhiraja`, and running the composite actions in its own jobs otherwise); for a public repo, require approval for workflows from every external contributor's fork pull request and say that the runner must allowlist the repo; print what the app must contain for each platform |
+| `apps init [--repo owner/name] [--signing-dir ~/.config/predictor-release]` | in a repo with `apps.json`: create the GitHub `production` environment, allowed only from `<prefix>*` tags, one rule per `tagPrefix` entry (existing rules stay); set the environment secrets (below) for the platforms in `builds`; write `.github/workflows/release.yml` if missing (calling the reusable workflows when the repo's owner is `Moulik-Budhiraja`, and running the composite actions in its own jobs otherwise); for a public repo, require approval for workflows from every external contributor's fork pull request and say that the runner must allowlist the repo; print what the app must contain for each platform |
 | `apps publish --version X [--platform mac\|windows] [--build N] [--notes-file f] [--minimum-system-version v] [--icon png]` and the platform's files: `--dmg p [--zip p] [--blockmap p]` for macOS, `--installer p [--blockmap p]` for Windows | read `apps.json`, sign the update file for sparkle, upload with progress, commit, set the icon if given (a failure there only warns), print the release. `--platform` defaults to `windows` when `--installer` is given and to `mac` otherwise |
 | `apps icon <png>` / `apps icon --remove` | set the app's icon, or remove it (admin) |
 | `apps releases [--app a --remote r]` | list releases, with their platforms. Logged in it reads the admin API, which includes withdrawn ones; otherwise it follows `releases.json`'s `next` pages |
@@ -468,19 +476,26 @@ jobs:
 job with `environment: production`, `timeout-minutes: 90` and a non-cancelling
 concurrency group per repo and platform. It checks out the app, checks out
 `Moulik-Budhiraja/app-hosting` into `.apps-tooling` at `tooling-ref`, and runs
-`./.apps-tooling/actions/release-<platform>` with `checkout: false` and
-`secrets: ${{ toJSON(secrets) }}`. Their inputs:
+`./.apps-tooling/actions/release-<platform>` with `checkout: false` and each secret as
+its own input (`apps-token: ${{ secrets.APPS_TOKEN }}` and so on). Their inputs:
 - `directory`: the folder holding `apps.json`, for monorepos. Default `.`.
 - `tooling-ref`: the ref of `Moulik-Budhiraja/app-hosting` to take the action, scripts
   and CLI from. Default `main`. GitHub doesn't tell a called workflow its own ref, so a
   caller that pins `@<ref>` should pass the same ref.
-- `build-secrets`: see below.
+- `build-secrets`: names of extra secrets the build `command` needs, separated by
+  spaces, commas or newlines, such as `with: { build-secrets: GOOGLE_OAUTH_CLIENT_BASE64 }`.
+  Default empty. The caller can't put secret values in `with:` here, so the wrapper
+  picks the named secrets from `secrets: inherit` in a step of its own
+  (`scripts/common/build-env.mjs from-secrets`) and passes them to the action as
+  `build-env`. That step is the only one that sees `toJSON(secrets)`, and it runs only
+  when `build-secrets` is set.
 - `runs-on` (`release-windows.yml` only): see below.
 
 **Other owners: composite actions in the caller's job.** The caller's job declares the
-runner, the environment, the timeout and the concurrency group itself, and passes its
-secrets in. Because the job runs in the caller repo with `environment: production`, its
-`secrets` context holds that environment's secrets, which stay limited to tags.
+runner, the environment, the timeout and the concurrency group itself, and passes each
+secret the action uses as its own input. Because the job runs in the caller repo with
+`environment: production`, `secrets.<NAME>` reads that environment's secrets, which stay
+limited to tags. The action never sees the repo's other secrets.
 ```yaml
 name: Release
 on:
@@ -499,7 +514,13 @@ jobs:
     steps:
       - uses: Moulik-Budhiraja/app-hosting/actions/release-mac@main
         with:
-          secrets: ${{ toJSON(secrets) }}
+          apps-token: ${{ secrets.APPS_TOKEN }}
+          sparkle-private-key: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          apple-certificate-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          apple-api-key-base64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          apple-key-id: ${{ secrets.APPLE_KEY_ID }}
+          apple-issuer-id: ${{ secrets.APPLE_ISSUER_ID }}
   windows:
     runs-on: [self-hosted, windows]
     environment: production
@@ -510,51 +531,86 @@ jobs:
     steps:
       - uses: Moulik-Budhiraja/app-hosting/actions/release-windows@main
         with:
-          secrets: ${{ toJSON(secrets) }}
+          apps-token: ${{ secrets.APPS_TOKEN }}
+          sparkle-private-key: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          azure-signing-endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          azure-signing-account: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          azure-signing-profile: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          azure-signing-publisher: ${{ secrets.AZURE_SIGNING_PUBLISHER }}
+          build-env: |
+            GOOGLE_OAUTH_CLIENT_BASE64=${{ secrets.GOOGLE_OAUTH_CLIENT_BASE64 }}
 ```
-The action takes the scripts and CLI from its own copy of the repo, at the ref after `@`,
-so it has no `tooling-ref`. Its inputs:
-- `secrets` (required): the job's secrets as JSON, `${{ toJSON(secrets) }}`. The action
-  reads only `APPS_TOKEN`, `SPARKLE_PRIVATE_KEY`, its platform's signing secrets
-  (`APPLE_*` or `AZURE_*`) and the names in `build-secrets`. GitHub masks the values in
-  logs.
+Electron apps leave out `sparkle-private-key`, and `build-env` is only for builds that
+need secrets of their own. The action takes the scripts and CLI from its own copy of the
+repo, at the ref after `@`, so it has no `tooling-ref`. Its inputs, all default empty
+unless noted:
+- `apps-token`: `APPS_TOKEN`, the app's publish token.
+- `sparkle-private-key`: `SPARKLE_PRIVATE_KEY`, for Sparkle apps.
+- macOS: `apple-certificate-base64`, `apple-certificate-password`, `apple-api-key-base64`,
+  `apple-key-id`, `apple-issuer-id` (the `APPLE_*` secrets).
+- Windows: `azure-tenant-id`, `azure-client-id`, `azure-client-secret`,
+  `azure-signing-endpoint`, `azure-signing-account`, `azure-signing-profile`,
+  `azure-signing-publisher` (the `AZURE_*` secrets).
+- `build-env`: variables for the build command only, see below.
 - `directory`: as above. Default `.`.
-- `build-secrets`: as above.
 - `checkout`: check out the calling repo first. Default `true`; the wrappers pass `false`.
+- `secrets` and `build-secrets`, deprecated: the job's whole secrets context as JSON
+  (`${{ toJSON(secrets) }}`), and names to pick from it for the build. They hand the
+  action every secret in the repo, and GitHub's malicious-workflow check held a test run
+  that passed `toJSON(secrets)` to the action. The action still reads
+  them, prints a deprecation warning, and prefers a named input over the same secret in
+  the JSON. They will be removed once no caller uses them.
 
-`build-secrets` lists the names of extra secrets the build `command` needs, separated by
-spaces, commas or newlines, such as `with: { build-secrets: GOOGLE_OAUTH_CLIENT_BASE64 }`.
-Default empty. It covers secrets the app bundles or uses at build time, such as an OAuth
-client file, kept in the `production` environment. When it's set, the build step runs
-the build through `scripts/common/with-build-secrets.mjs`, given the secrets JSON. That
-script starts `build-release.sh` (Mac) or `build-release.ps1` (Windows) with each listed
-secret as an environment variable of the same name, and without the JSON, so the build
-never sees the other secrets. The run fails before building if a listed secret is
-missing or empty, if a name isn't a valid variable name, or if it would replace a
-variable the build step already sets (such as `VERSION` or `AZURE_CLIENT_ID`). Names
-match secrets case-insensitively. The script prints only the names. Only the build step
-gets them, not publishing. With the input empty, the build step runs the build script
-directly. `release-local.sh` takes the same variables from the shell that runs it.
+**`build-env`** covers secrets the app bundles or uses at build time, such as an OAuth
+client file, kept in the `production` environment. It takes the form `$GITHUB_ENV` uses:
+`NAME=value` lines, and for a value that may hold a newline, a `NAME<<DELIMITER` line,
+the value, and a line holding only `DELIMITER`:
+```yaml
+build-env: |
+  GOOGLE_OAUTH_CLIENT_BASE64=${{ secrets.GOOGLE_OAUTH_CLIENT_BASE64 }}
+  SIGNING_PEM<<END_SIGNING_PEM
+  ${{ secrets.SIGNING_PEM }}
+  END_SIGNING_PEM
+```
+A multi-line secret in the `NAME=value` form leaves lines that aren't `NAME=value`, and
+the run fails on them; pick a delimiter that can't appear in the value. Early in the
+job, `scripts/common/build-env.mjs mask` checks the text and masks every line of every
+value with `::add-mask::`, so values that didn't come straight from `secrets` are hidden
+too. The build step then runs the build through `scripts/common/with-build-secrets.mjs`.
+That script starts `build-release.sh` (Mac) or `build-release.ps1` (Windows) with each
+variable under its own name, and without the `build-env` text itself, so the build never
+sees anything else. Only the build step gets them, not publishing. The run fails before
+building if a value is empty (usually a secret that isn't set), a line is malformed, a
+name repeats, or a name would replace a variable the build step already sets (such as
+`VERSION` or `AZURE_CLIENT_ID`). Errors give line numbers, never line text, and the
+script prints only the names. With no build secrets, the build step runs the build
+script directly. `release-local.sh` takes the same variables from the shell that runs it.
 
 The action's steps, on both platforms:
 
-1. Check out the app repo with `fetch-depth: 0` (unless `checkout` is false), and copy the
+1. Warn if the deprecated `secrets` or `build-secrets` inputs are set.
+2. Check out the app repo with `fetch-depth: 0` (unless `checkout` is false), and copy the
    action repo's `scripts` and `cli` to `$RUNNER_TEMP/apps-tooling` (`APPS_TOOLING`).
-2. Set up Node 24. `scripts/common/read-config.sh <apps.json> <platform>` reads
+3. Set up Node 24. `scripts/common/read-config.sh <apps.json> <platform>` reads
    `apps.json`.
-3. Fail at once if `APPS_TOKEN` isn't in the secrets, which means the job lacks
-   `environment: production`, the `secrets` input, or the secrets themselves.
-4. `scripts/common/check-tag.sh` checks that the tag is `<tagPrefix>X.Y.Z` and that the
-   tagged commit is on `origin/main`.
-5. The job skips the rest if `scripts/common/published.sh` finds the version live with
+4. Fail at once if `APPS_TOKEN` didn't arrive, which means the job lacks
+   `environment: production`, the `apps-token` input, or the secret itself.
+5. Check and mask `build-env`.
+6. `scripts/common/check-tag.sh <tag> <prefix>...` checks the tag against every
+   `tagPrefix` and that the tagged commit is on `origin/main`. The longest prefix the tag
+   starts with gives the version, so overlapping prefixes such as `v` and `v-beta` pick
+   the more specific one.
+7. The job skips the rest if `scripts/common/published.sh` finds the version live with
    files for its platform in `/<app>/releases/<version>.json`, for example after a local
    release or a re-run.
-6. Build the CLI (`npm ci && npm run build` in `$APPS_TOOLING/cli`).
-7. Build, sign and verify (per platform, below).
-8. The annotated tag's message becomes the release notes.
-9. `apps publish --platform <platform>`, with `APPS_TOKEN` and `SPARKLE_PRIVATE_KEY` from
-   the secrets.
-10. Check that the platform's live feed offers the new version.
+8. Build the CLI (`npm ci && npm run build` in `$APPS_TOOLING/cli`).
+9. Build, sign and verify (per platform, below).
+10. The annotated tag's message becomes the release notes.
+11. `apps publish --platform <platform>`, with `APPS_TOKEN` and `SPARKLE_PRIVATE_KEY`.
+12. Check that the platform's live feed offers the new version.
 
 ### macOS (`release-mac.yml`, `actions/release-mac`)
 

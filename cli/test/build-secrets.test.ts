@@ -71,3 +71,79 @@ test("passes the build's exit code through", () => {
   const r = run("FOO", secrets, {}, ["-e", "process.exit(7)"]);
   assert.equal(r.status, 7);
 });
+
+const buildEnvScript = fileURLToPath(new URL("../../scripts/common/build-env.mjs", import.meta.url));
+const pem = "-----BEGIN KEY-----\nline \"two\" \\ end % 100%0A\n-----END KEY-----";
+
+test("build-env hands the build its NAME=value and NAME<<DELIMITER values only", () => {
+  const buildEnv = `FOO=foo-value=with=equals\r\n\nPEM<<EOF_PEM\n${pem}\nEOF_PEM\n  BAR=bar value  \n`;
+  const r = run("", {}, { APPS_BUILD_ENV: buildEnv });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { FOO: "foo-value=with=equals", PEM: pem, BAR: "bar value  " });
+  assert.match(r.stderr, /Build secrets: FOO, PEM, BAR/);
+  assert.ok(!r.stderr.includes("foo-value") && !r.stderr.includes("BEGIN KEY"));
+});
+
+test("build-env and the deprecated build-secrets work together", () => {
+  const r = run("BAR", secrets, { APPS_BUILD_ENV: "FOO=from-env" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { FOO: "from-env", BAR: "bar-value" });
+  const both = run("FOO", secrets, { APPS_BUILD_ENV: "FOO=from-env" });
+  assert.equal(both.status, 1);
+  assert.match(both.stderr, /FOO comes from both build-env and build-secrets/);
+});
+
+test("bad build-env fails without printing any of it", () => {
+  // A multi-line secret pasted after NAME= leaves lines that aren't NAME=value.
+  const r = run("", {}, { APPS_BUILD_ENV: `PEM=${pem}\nEMPTY=\nFOO=a\nfoo=b\nOPEN<<NEVER\nsecret-tail` });
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, "");
+  assert.match(r.stderr, /build-env line 2 isn't NAME=value or NAME<<DELIMITER/);
+  assert.match(r.stderr, /EMPTY an empty value/);
+  assert.match(r.stderr, /sets foo twice/);
+  assert.match(r.stderr, /OPEN has no closing NEVER line/);
+  for (const fragment of ["two", "END KEY", "secret-tail"]) assert.ok(!r.stderr.includes(fragment), fragment);
+  const clash = run("", {}, { APPS_BUILD_ENV: "LOWERCASE=x", lowercase: "already here" });
+  assert.equal(clash.status, 1);
+  assert.match(clash.stderr, /LOWERCASE would replace a variable/);
+});
+
+test("build-env.mjs mask hides every value line, escaped as a workflow command", () => {
+  const r = spawnSync(process.execPath, [buildEnvScript, "mask"], {
+    env: { ...process.env, APPS_BUILD_ENV: `FOO=foo%value\nPEM<<EOF_PEM\n${pem}\nEOF_PEM` },
+    encoding: "utf8",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split("\n"), [
+    "::add-mask::foo%25value",
+    "::add-mask::-----BEGIN KEY-----",
+    "::add-mask::line \"two\" \\ end %25 100%250A",
+    "::add-mask::-----END KEY-----",
+    "Build env: FOO, PEM",
+  ]);
+  const bad = spawnSync(process.execPath, [buildEnvScript, "mask"], { env: { ...process.env, APPS_BUILD_ENV: "not a line" }, encoding: "utf8" });
+  assert.equal(bad.status, 1);
+  assert.equal(bad.stdout, "");
+});
+
+test("build-env.mjs from-secrets turns build-secrets names into build-env", () => {
+  const r = spawnSync(process.execPath, [buildEnvScript, "from-secrets"], {
+    env: { ...process.env, APPS_BUILD_SECRETS: "FOO, pem", APPS_SECRETS_JSON: JSON.stringify(secrets) },
+    encoding: "utf8",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const match = /^build_env<<(APPS_OUTPUT_[0-9a-f]+)\n([\s\S]*)\n\1\n$/.exec(r.stdout);
+  assert.ok(match, r.stdout);
+  // The text it wrote is what the build then gets.
+  const back = run("", {}, { APPS_BUILD_ENV: match[2]! });
+  assert.equal(back.status, 0, back.stderr);
+  assert.deepEqual(JSON.parse(back.stdout), { FOO: "foo-value", pem: secrets.PEM });
+
+  const missing = spawnSync(process.execPath, [buildEnvScript, "from-secrets"], {
+    env: { ...process.env, APPS_BUILD_SECRETS: "NOPE", APPS_SECRETS_JSON: JSON.stringify(secrets) },
+    encoding: "utf8",
+  });
+  assert.equal(missing.status, 1);
+  assert.equal(missing.stdout, "");
+  assert.match(missing.stderr, /build-secrets: NOPE isn't set/);
+});

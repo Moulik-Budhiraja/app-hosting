@@ -63,8 +63,14 @@ export interface AppFile {
   app: string;
   remote: { name: string; url: string };
   updater: Updater;
-  tagPrefix: string;
+  /** One prefix, or several: a tag matching any of them releases. */
+  tagPrefix: string | string[];
   builds: Builds;
+}
+
+/** An app's tag prefixes, in the order apps.json lists them. */
+export function tagPrefixes(file: Pick<AppFile, "tagPrefix">): string[] {
+  return typeof file.tagPrefix === "string" ? [file.tagPrefix] : [...file.tagPrefix];
 }
 
 export const APP_FILE = "apps.json";
@@ -224,8 +230,16 @@ export function validateAppFile(raw: unknown): AppFile {
   if (value.updater !== "sparkle" && value.updater !== "electron") throw bad('updater must be "sparkle" or "electron".');
   const updater = value.updater;
 
-  const tagPrefix = value.tagPrefix === undefined ? "v" : text(value.tagPrefix, "tagPrefix");
-  if (/[\s*?[\]~^:\\]/.test(tagPrefix)) throw bad("tagPrefix can't contain spaces or wildcard characters.");
+  let tagPrefix: string | string[];
+  if (value.tagPrefix === undefined) tagPrefix = "v";
+  else if (Array.isArray(value.tagPrefix)) {
+    if (!value.tagPrefix.length) throw bad("tagPrefix must be a non-empty string or a list of them.");
+    tagPrefix = value.tagPrefix.map((item, i) => text(item, `tagPrefix[${i}]`));
+    if (new Set(tagPrefix).size !== tagPrefix.length) throw bad("tagPrefix lists the same prefix twice.");
+  } else tagPrefix = text(value.tagPrefix, "tagPrefix");
+  if ((typeof tagPrefix === "string" ? [tagPrefix] : tagPrefix).some((prefix) => /[\s*?[\]~^:\\]/.test(prefix))) {
+    throw bad("tagPrefix can't contain spaces or wildcard characters.");
+  }
 
   // The older form, a top-level "build", is the macOS build.
   const builds: Builds = {};

@@ -4,10 +4,10 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { defaultBuildSection, expandPath, feedName, platformsOf, validateAppFile } from "../src/appfile.js";
+import { defaultBuildSection, expandPath, feedName, platformsOf, tagPrefixes, validateAppFile } from "../src/appfile.js";
 import { feedVersion } from "../src/commands/manage.js";
 import { publishPlatform } from "../src/commands/publish.js";
-import { integrationLines, parsePlatforms, workflowForm, workflowTemplate } from "../src/commands/setup.js";
+import { actionSecretInputs, integrationLines, parsePlatforms, workflowForm, workflowTemplate } from "../src/commands/setup.js";
 import { loadConfig, normalizeUrl, saveConfig } from "../src/config.js";
 import { generateSparkleKeys, publicKeyFor, readPrivateKey, signArchive, verifyArchive } from "../src/sparkle.js";
 import { compareVersions, defaultBuild, parseVersion } from "../src/version.js";
@@ -145,15 +145,46 @@ test("repos outside Moulik-Budhiraja get the composite-action workflow", () => {
   assert.equal(workflowForm("Proletic/proactive-agent"), "action");
   assert.equal(workflowForm("someone/app"), "action");
 
-  const both = workflowTemplate("win-v", ["mac", "windows"], "action");
+  const both = workflowTemplate("win-v", ["mac", "windows"], "action", "sparkle");
   assert.match(both, /tags: \['win-v\*'\]/);
   assert.match(both, /permissions:\n  contents: read\n/);
   for (const [platform, runner] of [["mac", "\\[self-hosted, macos-ephemeral\\]"], ["windows", "\\[self-hosted, windows\\]"]]) {
     assert.match(both, new RegExp(`  ${platform}:\\n    runs-on: ${runner}\\n    environment: production\\n    timeout-minutes: 90\\n`));
     assert.match(both, new RegExp(`group: release-${platform}-\\$\\{\\{ github\\.repository \\}\\}`));
-    assert.match(both, new RegExp(`uses: Moulik-Budhiraja/app-hosting/actions/release-${platform}@main\\n        with:\\n          secrets: \\$\\{\\{ toJSON\\(secrets\\) \\}\\}`));
+    assert.match(both, new RegExp(`uses: Moulik-Budhiraja/app-hosting/actions/release-${platform}@main\\n        with:\\n          apps-token: \\$\\{\\{ secrets\\.APPS_TOKEN \\}\\}\\n          sparkle-private-key: `));
   }
-  assert.doesNotMatch(both, /^ +secrets: inherit$|uses: .*\.github\/workflows/m);
+  // Each secret by name, never the whole secrets context.
+  assert.doesNotMatch(both, /^ +secrets: inherit$|toJSON|uses: .*\.github\/workflows/m);
+  for (const name of ["APPLE_CERTIFICATE_BASE64", "APPLE_CERTIFICATE_PASSWORD", "APPLE_API_KEY_BASE64", "APPLE_KEY_ID", "APPLE_ISSUER_ID",
+    "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SIGNING_ENDPOINT", "AZURE_SIGNING_ACCOUNT", "AZURE_SIGNING_PROFILE", "AZURE_SIGNING_PUBLISHER"]) {
+    const input = name.toLowerCase().replaceAll("_", "-");
+    assert.ok(both.includes(`          ${input}: \${{ secrets.${name} }}\n`), name);
+  }
+  // Electron apps have no Sparkle key, and the Mac job gets no Azure secrets.
+  const electron = workflowTemplate("v", ["mac"], "action", "electron");
+  assert.doesNotMatch(electron, /sparkle-private-key|azure-/);
+  assert.deepEqual(actionSecretInputs("windows", "electron").map(([input]) => input), [
+    "apps-token", "azure-tenant-id", "azure-client-id", "azure-client-secret", "azure-signing-endpoint",
+    "azure-signing-account", "azure-signing-profile", "azure-signing-publisher",
+  ]);
+});
+
+test("tagPrefix takes one prefix or a list", () => {
+  const base = { app: "proactive-agent", remote: { name: "proletic", url: "https://apps.proletic.co" }, updater: "electron" as const, build: { kind: "electron", command: "npm run build:mac", dmg: "d/a-{version}.dmg", zip: "d/a-{version}.zip" } };
+  assert.equal(validateAppFile(base).tagPrefix, "v");
+  assert.equal(validateAppFile({ ...base, tagPrefix: "win-v" }).tagPrefix, "win-v");
+  assert.deepEqual(validateAppFile({ ...base, tagPrefix: ["v", "win-v"] }).tagPrefix, ["v", "win-v"]);
+  assert.deepEqual(tagPrefixes(validateAppFile({ ...base, tagPrefix: ["v", "win-v"] })), ["v", "win-v"]);
+  assert.deepEqual(tagPrefixes(validateAppFile(base)), ["v"]);
+  assert.throws(() => validateAppFile({ ...base, tagPrefix: [] }), /tagPrefix must be a non-empty string or a list/);
+  assert.throws(() => validateAppFile({ ...base, tagPrefix: ["v", "v"] }), /same prefix twice/);
+  assert.throws(() => validateAppFile({ ...base, tagPrefix: ["v", ""] }), /tagPrefix\[1\]/);
+  assert.throws(() => validateAppFile({ ...base, tagPrefix: ["v", "win v"] }), /spaces or wildcard/);
+  assert.throws(() => validateAppFile({ ...base, tagPrefix: ["v*"] }), /spaces or wildcard/);
+
+  assert.match(workflowTemplate(["v", "win-v"], ["windows"]), /tags: \['v\*', 'win-v\*'\]/);
+  assert.match(workflowTemplate(["v", "win-v"], ["windows"], "action", "electron"), /tags: \['v\*', 'win-v\*'\]/);
+  assert.equal(workflowTemplate("v", ["mac"]), workflowTemplate(["v"], ["mac"]));
 });
 
 test("Sparkle keys: 32-byte seed, raw public key, sign and verify", () => {

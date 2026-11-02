@@ -43,8 +43,14 @@ out.app = c.app;
 out.remote_name = c.remote.name;
 out.remote_url = c.remote.url.replace(/\/+$/, '');
 out.updater = c.updater;
-out.tag_prefix = c.tagPrefix ?? 'v';
-if (!str(out.tag_prefix)) fail('tagPrefix must be a non-empty string');
+// tagPrefix is a string or a list of them. tag_prefix is the first one, for
+// messages; tag_prefixes has them all, longest first, separated by spaces.
+const prefixes = c.tagPrefix === undefined ? ['v'] : Array.isArray(c.tagPrefix) ? c.tagPrefix : [c.tagPrefix];
+if (!prefixes.length || !prefixes.every(str)) fail('tagPrefix must be a non-empty string or a list of them');
+if (prefixes.some((p) => /[\s*?[\]~^:\\]/.test(p))) fail("tagPrefix can't contain spaces or wildcard characters");
+if (new Set(prefixes).size !== prefixes.length) fail('tagPrefix lists the same prefix twice');
+out.tag_prefix = prefixes[0];
+out.tag_prefixes = [...prefixes].sort((a, b) => b.length - a.length).join(' ');
 out.kind = b.kind;
 out.command = b.command;
 

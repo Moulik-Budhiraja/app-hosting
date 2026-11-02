@@ -91,10 +91,33 @@ jobs:
           path: .apps-tooling
           persist-credentials: false
 
+      - uses: actions/setup-node@v4
+        if: inputs.build-secrets != ''
+        with:
+          node-version: 24
+
+      # build-secrets names secrets that came with secrets: inherit. Turn them
+      # into build-env lines here, so the action gets only those secrets.
+      - name: Pick the build secrets
+        id: build-env
+        if: inputs.build-secrets != ''
+        shell: bash
+        env:
+          APPS_BUILD_SECRETS: ${{ inputs.build-secrets }}
+          APPS_SECRETS_JSON: ${{ toJSON(secrets) }}
+        run: |
+          node .apps-tooling/scripts/common/build-env.mjs from-secrets >> "$GITHUB_OUTPUT"
+
       - name: Build, notarize and publish
         uses: ./.apps-tooling/actions/release-mac
         with:
           checkout: 'false'
           directory: ${{ inputs.directory }}
-          build-secrets: ${{ inputs.build-secrets }}
-          secrets: ${{ toJSON(secrets) }}
+          apps-token: ${{ secrets.APPS_TOKEN }}
+          sparkle-private-key: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          apple-certificate-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          apple-api-key-base64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          apple-key-id: ${{ secrets.APPLE_KEY_ID }}
+          apple-issuer-id: ${{ secrets.APPLE_ISSUER_ID }}
+          build-env: ${{ steps.build-env.outputs.build_env }}

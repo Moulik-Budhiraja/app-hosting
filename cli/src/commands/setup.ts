@@ -11,6 +11,7 @@ import {
   PLATFORMS,
   platformsOf,
   readAppFile,
+  tagPrefixes,
   titleFromName,
   writeAppFile,
   type AppFile,
@@ -43,8 +44,25 @@ export function workflowForm(repo: string): WorkflowForm {
 
 const RUNNERS: Record<Platform, string> = { mac: "[self-hosted, macos-ephemeral]", windows: "[self-hosted, windows]" };
 
+/** The secrets each release action takes as its own inputs: [input, secret name]. */
+export function actionSecretInputs(platform: Platform, updater: Updater): [string, string][] {
+  const signing: [string, string][] = platform === "mac"
+    ? [["apple-certificate-base64", "APPLE_CERTIFICATE_BASE64"], ["apple-certificate-password", "APPLE_CERTIFICATE_PASSWORD"],
+      ["apple-api-key-base64", "APPLE_API_KEY_BASE64"], ["apple-key-id", "APPLE_KEY_ID"], ["apple-issuer-id", "APPLE_ISSUER_ID"]]
+    : [["azure-tenant-id", "AZURE_TENANT_ID"], ["azure-client-id", "AZURE_CLIENT_ID"], ["azure-client-secret", "AZURE_CLIENT_SECRET"],
+      ["azure-signing-endpoint", "AZURE_SIGNING_ENDPOINT"], ["azure-signing-account", "AZURE_SIGNING_ACCOUNT"],
+      ["azure-signing-profile", "AZURE_SIGNING_PROFILE"], ["azure-signing-publisher", "AZURE_SIGNING_PUBLISHER"]];
+  return [["apps-token", "APPS_TOKEN"], ...(updater === "sparkle" ? [["sparkle-private-key", "SPARKLE_PRIVATE_KEY"] as [string, string]] : []), ...signing];
+}
+
 /** The app repo's release.yml: one job per platform. */
-export function workflowTemplate(tagPrefix: string, platforms: readonly Platform[] = ["mac"], form: WorkflowForm = "reusable"): string {
+export function workflowTemplate(
+  tagPrefix: string | readonly string[],
+  platforms: readonly Platform[] = ["mac"],
+  form: WorkflowForm = "reusable",
+  updater: Updater = "sparkle",
+): string {
+  const tags = (typeof tagPrefix === "string" ? [tagPrefix] : tagPrefix).map((prefix) => `'${prefix}*'`).join(", ");
   if (form === "reusable") {
     const jobs = platforms.map((platform) => `  ${platform}:
     uses: ${TOOLING_OWNER}/app-hosting/.github/workflows/release-${platform}.yml@main
@@ -53,7 +71,7 @@ export function workflowTemplate(tagPrefix: string, platforms: readonly Platform
     return `name: Release
 on:
   push:
-    tags: ['${tagPrefix}*']
+    tags: [${tags}]
 jobs:
 ${jobs.join("")}`;
   }
@@ -67,15 +85,17 @@ ${jobs.join("")}`;
     steps:
       - uses: ${TOOLING_OWNER}/app-hosting/actions/release-${platform}@main
         with:
-          secrets: \${{ toJSON(secrets) }}
-`);
+${actionSecretInputs(platform, updater).map(([input, name]) => `          ${input}: \${{ secrets.${name} }}\n`).join("")}`);
   return `# This repo isn't owned by ${TOOLING_OWNER}, so it runs the release actions in
 # its own jobs: secrets: inherit doesn't reach another owner's reusable workflow.
-# The secrets come from this repo's production environment.
+# Each job passes the secrets it needs from this repo's production environment.
+# If the build needs secrets of its own, add them to a job's with: block as
+#   build-env: |
+#     NAME=\${{ secrets.NAME }}
 name: Release
 on:
   push:
-    tags: ['${tagPrefix}*']
+    tags: [${tags}]
 permissions:
   contents: read
 jobs:
@@ -395,7 +415,9 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
     publicKey = publicKeyFor(privateKey);
   }
 
-  const policy = `${file.tagPrefix}*`;
+  const prefixes = tagPrefixes(file);
+  const tagPolicies = prefixes.map((prefix) => `${prefix}*`);
+  const policy = tagPolicies.join(", ");
   const label = `github-actions ${repo}`;
   const workflowPath = join(options.dir, WORKFLOW_PATH);
   const writeWorkflow = !(await exists(workflowPath));
@@ -411,7 +433,8 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
     app: file.app,
     remote: file.remote.name,
     environment: ENVIRONMENT,
-    tagPolicy: policy,
+    tagPolicy: tagPolicies[0],
+    tagPolicies,
     platforms,
     secrets: secretNames,
     signingDir,
@@ -472,10 +495,13 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
   const policies = JSON.parse(
     await deps.gh.run(["api", `repos/${repo}/environments/${ENVIRONMENT}/deployment-branch-policies`]),
   ) as { branch_policies?: { id: number; name: string; type?: string }[] };
-  if (!policies.branch_policies?.some((item) => item.name === policy && (item.type ?? "branch") === "tag")) {
-    await deps.gh.run(["api", "-X", "POST", `repos/${repo}/environments/${ENVIRONMENT}/deployment-branch-policies`, "--input", "-"], {
-      input: JSON.stringify({ name: policy, type: "tag" }),
-    });
+  // One tag rule per prefix; existing rules stay.
+  for (const name of tagPolicies) {
+    if (!policies.branch_policies?.some((item) => item.name === name && (item.type ?? "branch") === "tag")) {
+      await deps.gh.run(["api", "-X", "POST", `repos/${repo}/environments/${ENVIRONMENT}/deployment-branch-policies`, "--input", "-"], {
+        input: JSON.stringify({ name, type: "tag" }),
+      });
+    }
   }
 
   if (isPublic) {
@@ -515,7 +541,7 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
 
   if (writeWorkflow) {
     await mkdir(join(options.dir, ".github", "workflows"), { recursive: true });
-    await writeFile(workflowPath, workflowTemplate(file.tagPrefix, platforms, form), { flag: "wx" });
+    await writeFile(workflowPath, workflowTemplate(file.tagPrefix, platforms, form, file.updater), { flag: "wx" });
   }
 
   out.result(
@@ -523,7 +549,7 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
       `${repo} is ready to release ${file.app} to ${file.remote.name}.`,
       `  Environment: ${ENVIRONMENT} (tags ${policy}), ${secretNames.length} secrets set`,
       writeWorkflow ? `  Wrote ${WORKFLOW_PATH}. Commit it.` : `  Kept the existing ${WORKFLOW_PATH}.`,
-      `  Release by pushing a tag on main, e.g. ${file.tagPrefix}1.0.0`,
+      `  Release by pushing a tag on main, e.g. ${prefixes.map((prefix) => `${prefix}1.0.0`).join(" or ")}`,
       previous.length ? `  Revoked ${previous.length} older publish token${previous.length === 1 ? "" : "s"}.` : "",
       isPublic ? `  Fork pull requests now need your approval before their workflows run.` : "",
       "",

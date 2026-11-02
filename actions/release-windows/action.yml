@@ -15,7 +15,20 @@
 #     steps:
 #       - uses: Moulik-Budhiraja/app-hosting/actions/release-windows@main
 #         with:
-#           secrets: ${{ toJSON(secrets) }}
+#           apps-token: ${{ secrets.APPS_TOKEN }}
+#           sparkle-private-key: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+#           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+#           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+#           azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+#           azure-signing-endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+#           azure-signing-account: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+#           azure-signing-profile: ${{ secrets.AZURE_SIGNING_PROFILE }}
+#           azure-signing-publisher: ${{ secrets.AZURE_SIGNING_PUBLISHER }}
+#           # Only if the build needs secrets of its own:
+#           build-env: |
+#             GOOGLE_OAUTH_CLIENT_BASE64=${{ secrets.GOOGLE_OAUTH_CLIENT_BASE64 }}
+#
+# Leave sparkle-private-key out for electron apps.
 #
 # release-windows.yml wraps this action for apps under Moulik-Budhiraja. The
 # runner needs Git for Windows (its bash first on PATH, not WSL's) and
@@ -24,21 +37,52 @@ name: Release Windows app
 description: Build, sign and publish an app's Windows release from a release tag.
 
 inputs:
-  secrets:
-    description: >-
-      The job's secrets as JSON (toJSON of the secrets context). The action reads
-      APPS_TOKEN, SPARKLE_PRIVATE_KEY, the AZURE_* signing secrets and the names
-      in build-secrets from it, and nothing else.
-    required: true
   directory:
     description: Folder holding apps.json, relative to the repo root.
     default: .
+  apps-token:
+    description: secrets.APPS_TOKEN.
+    default: ''
+  sparkle-private-key:
+    description: secrets.SPARKLE_PRIVATE_KEY (Sparkle apps only).
+    default: ''
+  azure-tenant-id:
+    description: secrets.AZURE_TENANT_ID.
+    default: ''
+  azure-client-id:
+    description: secrets.AZURE_CLIENT_ID.
+    default: ''
+  azure-client-secret:
+    description: secrets.AZURE_CLIENT_SECRET.
+    default: ''
+  azure-signing-endpoint:
+    description: secrets.AZURE_SIGNING_ENDPOINT.
+    default: ''
+  azure-signing-account:
+    description: secrets.AZURE_SIGNING_ACCOUNT.
+    default: ''
+  azure-signing-profile:
+    description: secrets.AZURE_SIGNING_PROFILE.
+    default: ''
+  azure-signing-publisher:
+    description: secrets.AZURE_SIGNING_PUBLISHER.
+    default: ''
+  build-env:
+    description: >-
+      Environment variables for the build command only, usually secrets the app
+      bundles: NAME=value lines, or for a value with several lines, a NAME<<DELIMITER
+      line, the value, and a line holding only DELIMITER. Values are masked in logs.
+      The run fails if a value is empty.
+    default: ''
   build-secrets:
     description: >-
-      Names of extra secrets the build command needs, separated by spaces, commas
-      or newlines, such as GOOGLE_OAUTH_CLIENT_BASE64. Each one reaches the build
-      step as an environment variable of the same name. The run fails if one
-      isn't set.
+      Deprecated, use build-env. Names of secrets to look up in the secrets input
+      and hand to the build.
+    default: ''
+  secrets:
+    description: >-
+      Deprecated, pass each secret as its own input. The job's secrets as JSON; the
+      action reads its secrets from it when their own inputs are empty.
     default: ''
   checkout:
     description: >-
@@ -54,6 +98,12 @@ runs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
+
+    - name: Warn about deprecated inputs
+      if: inputs.secrets != '' || inputs.build-secrets != ''
+      shell: bash
+      run: |
+        echo "::warning::The secrets and build-secrets inputs are deprecated: they hand the action every secret in the repo. Pass each secret as its own input (apps-token, sparkle-private-key, azure-*) and build secrets as build-env lines."
 
     - name: Copy the release tooling
       shell: pwsh
@@ -81,12 +131,20 @@ runs:
       shell: bash
       working-directory: ${{ inputs.directory }}
       env:
-        APPS_TOKEN: ${{ fromJSON(inputs.secrets || '{}').APPS_TOKEN }}
+        APPS_TOKEN: ${{ inputs.apps-token || fromJSON(inputs.secrets || '{}').APPS_TOKEN }}
       run: |
         if [[ -z $APPS_TOKEN ]]; then
-          echo "::error::APPS_TOKEN didn't reach the release job. The job needs environment: production, the action needs the secrets input set to the toJSON of the secrets context, and apps init sets the secrets."
+          echo "::error::APPS_TOKEN didn't reach the release job. Give the job environment: production and pass apps-token from secrets.APPS_TOKEN; apps init sets the secrets."
           exit 1
         fi
+
+    - name: Mask the build env
+      if: inputs.build-env != ''
+      shell: bash
+      env:
+        APPS_BUILD_ENV: ${{ inputs.build-env }}
+      run: |
+        node "$APPS_TOOLING/scripts/common/build-env.mjs" mask
 
     - name: Check the tag
       id: tag
@@ -96,9 +154,12 @@ runs:
         REF_TYPE: ${{ github.ref_type }}
         TAG: ${{ github.ref_name }}
         PREFIX: ${{ steps.config.outputs.tag_prefix }}
+        PREFIXES: ${{ steps.config.outputs.tag_prefixes }}
       run: |
         [[ $REF_TYPE == tag ]] || { echo "Releases run from tags like ${PREFIX}1.2.3 pushed on main" >&2; exit 1; }
-        bash "$APPS_TOOLING/scripts/common/check-tag.sh" "$TAG" "$PREFIX" | tee -a "$GITHUB_OUTPUT"
+        # The prefixes have no spaces (read-config checks), so split them into arguments.
+        # shellcheck disable=SC2086
+        bash "$APPS_TOOLING/scripts/common/check-tag.sh" "$TAG" ${PREFIXES:-$PREFIX} | tee -a "$GITHUB_OUTPUT"
 
     - name: Skip if already published
       id: existing
@@ -139,19 +200,20 @@ runs:
       env:
         VERSION: ${{ steps.tag.outputs.version }}
         BUILD: ${{ steps.tag.outputs.build }}
-        AZURE_TENANT_ID: ${{ fromJSON(inputs.secrets || '{}').AZURE_TENANT_ID }}
-        AZURE_CLIENT_ID: ${{ fromJSON(inputs.secrets || '{}').AZURE_CLIENT_ID }}
-        AZURE_CLIENT_SECRET: ${{ fromJSON(inputs.secrets || '{}').AZURE_CLIENT_SECRET }}
-        AZURE_SIGNING_ENDPOINT: ${{ fromJSON(inputs.secrets || '{}').AZURE_SIGNING_ENDPOINT }}
-        AZURE_SIGNING_ACCOUNT: ${{ fromJSON(inputs.secrets || '{}').AZURE_SIGNING_ACCOUNT }}
-        AZURE_SIGNING_PROFILE: ${{ fromJSON(inputs.secrets || '{}').AZURE_SIGNING_PROFILE }}
-        AZURE_SIGNING_PUBLISHER: ${{ fromJSON(inputs.secrets || '{}').AZURE_SIGNING_PUBLISHER }}
-        # Only when the caller asks for build secrets. The wrapper hands the
-        # build just the named ones and drops these two variables.
+        AZURE_TENANT_ID: ${{ inputs.azure-tenant-id || fromJSON(inputs.secrets || '{}').AZURE_TENANT_ID }}
+        AZURE_CLIENT_ID: ${{ inputs.azure-client-id || fromJSON(inputs.secrets || '{}').AZURE_CLIENT_ID }}
+        AZURE_CLIENT_SECRET: ${{ inputs.azure-client-secret || fromJSON(inputs.secrets || '{}').AZURE_CLIENT_SECRET }}
+        AZURE_SIGNING_ENDPOINT: ${{ inputs.azure-signing-endpoint || fromJSON(inputs.secrets || '{}').AZURE_SIGNING_ENDPOINT }}
+        AZURE_SIGNING_ACCOUNT: ${{ inputs.azure-signing-account || fromJSON(inputs.secrets || '{}').AZURE_SIGNING_ACCOUNT }}
+        AZURE_SIGNING_PROFILE: ${{ inputs.azure-signing-profile || fromJSON(inputs.secrets || '{}').AZURE_SIGNING_PROFILE }}
+        AZURE_SIGNING_PUBLISHER: ${{ inputs.azure-signing-publisher || fromJSON(inputs.secrets || '{}').AZURE_SIGNING_PUBLISHER }}
+        # Only when the caller passes build secrets. The wrapper hands the build
+        # just those and drops these three variables.
+        APPS_BUILD_ENV: ${{ inputs.build-env }}
         APPS_BUILD_SECRETS: ${{ inputs.build-secrets }}
         APPS_SECRETS_JSON: ${{ inputs.build-secrets != '' && inputs.secrets || '' }}
       run: |
-        if ($env:APPS_BUILD_SECRETS) {
+        if ($env:APPS_BUILD_ENV -or $env:APPS_BUILD_SECRETS) {
           $pwsh = (Get-Process -Id $PID).Path
           & node "$env:APPS_TOOLING/scripts/common/with-build-secrets.mjs" $pwsh -NoProfile -NonInteractive -File "$env:APPS_TOOLING/scripts/windows/build-release.ps1" apps.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -183,8 +245,8 @@ runs:
       shell: bash
       working-directory: ${{ inputs.directory }}
       env:
-        APPS_TOKEN: ${{ fromJSON(inputs.secrets || '{}').APPS_TOKEN }}
-        SPARKLE_PRIVATE_KEY: ${{ fromJSON(inputs.secrets || '{}').SPARKLE_PRIVATE_KEY }}
+        APPS_TOKEN: ${{ inputs.apps-token || fromJSON(inputs.secrets || '{}').APPS_TOKEN }}
+        SPARKLE_PRIVATE_KEY: ${{ inputs.sparkle-private-key || fromJSON(inputs.secrets || '{}').SPARKLE_PRIVATE_KEY }}
         VERSION: ${{ steps.tag.outputs.version }}
         BUILD: ${{ steps.tag.outputs.build }}
         INSTALLER: ${{ steps.build.outputs.installer }}

@@ -253,8 +253,8 @@ test("init for a Windows-only app needs no Apple files or issuer", async () => {
     // me/win isn't owned by Moulik-Budhiraja, so its jobs run the release action themselves.
     assert.equal(workflow, workflowTemplate("v", ["windows"], "action"));
     assert.match(workflow, /runs-on: \[self-hosted, windows\]\n    environment: production\n/);
-    assert.match(workflow, /uses: Moulik-Budhiraja\/app-hosting\/actions\/release-windows@main\n        with:\n          secrets: \$\{\{ toJSON\(secrets\) \}\}\n/);
-    assert.doesNotMatch(workflow, /^ +secrets: inherit$|release-mac/m);
+    assert.match(workflow, /uses: Moulik-Budhiraja\/app-hosting\/actions\/release-windows@main\n        with:\n          apps-token: \$\{\{ secrets\.APPS_TOKEN \}\}\n          sparkle-private-key: \$\{\{ secrets\.SPARKLE_PRIVATE_KEY \}\}\n          azure-tenant-id: \$\{\{ secrets\.AZURE_TENANT_ID \}\}\n/);
+    assert.doesNotMatch(workflow, /^ +secrets: inherit$|toJSON|release-mac/m);
     assert.ok(server.tokens.some((item) => item.app === name));
   } finally {
     await h.cleanup();
@@ -279,6 +279,33 @@ test("init refuses a Windows build without complete Artifact Signing settings", 
     const notObject = await h.run("init", "--dry-run", "--signing-dir", signing);
     assert.equal(notObject.code, 2);
     assert.match(notObject.stderr, /isn't a JSON object/);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("init adds a tag rule for every prefix and keeps the ones already there", async () => {
+  const { h, signing } = await setup(ghResponder([{ name: "v*", type: "tag" }]));
+  try {
+    const path = join(h.dir, "apps.json");
+    const file = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(path, JSON.stringify({ ...file, tagPrefix: ["v", "win-v"] }, null, 2));
+
+    const dry = JSON.parse((await h.run("init", "--dry-run", "--signing-dir", signing, "--json")).stdout);
+    assert.equal(dry.tagPolicy, "v*");
+    assert.deepEqual(dry.tagPolicies, ["v*", "win-v*"]);
+
+    const result = await h.run("init", "--signing-dir", signing, "--apple-issuer-id", "issuer-x");
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /tags v\*, win-v\*/);
+    assert.match(result.stdout, /e\.g\. v1\.0\.0 or win-v1\.0\.0/);
+    // v* existed, so only win-v* is added.
+    const posted = h.gh.calls
+      .filter((call) => call.args.includes("POST") && call.args.some((arg) => arg.endsWith("/deployment-branch-policies")))
+      .map((call) => JSON.parse(call.options!.input!));
+    assert.deepEqual(posted, [{ name: "win-v*", type: "tag" }]);
+    const workflow = await readFile(join(h.dir, ".github/workflows/release.yml"), "utf8");
+    assert.match(workflow, /tags: \['v\*', 'win-v\*'\]/);
   } finally {
     await h.cleanup();
   }

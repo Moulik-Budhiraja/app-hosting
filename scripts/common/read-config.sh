@@ -5,7 +5,8 @@
 #   scripts/common/read-config.sh [path/to/apps.json] [mac|windows] >> "$GITHUB_OUTPUT"
 #
 # The platform defaults to mac. Keys for every platform: app, remote_name,
-# remote_url, updater, tag_prefix, kind, command. For mac native builds:
+# remote_url, updater, tag_prefix (the first prefix), tag_prefixes (all of them,
+# longest first, separated by spaces), kind, command. For mac native builds:
 # app_path, entitlements, dmg_name; for mac electron builds: dmg, zip,
 # blockmap. For windows: installer, blockmap, minimum_system_version, icon.
 # Artifact paths may still contain {version}. A legacy top-level "build" reads

@@ -15,7 +15,11 @@ Windows: native apps (Sparkle on macOS, WinSparkle on Windows) or Electron
 - `actions/release-mac` and `actions/release-windows` hold the steps those workflows run.
   Repos owned by another account, such as Proletic, call these actions from their own
   jobs, because `secrets: inherit` doesn't pass secrets to another owner's workflow.
-- `scripts/common/` reads `apps.json` and checks tags for both workflows.
+  Those jobs pass each secret as its own input (`apps-token`, `azure-*`, `apple-*`), and
+  build-time secrets as `build-env` lines; never the whole `toJSON(secrets)`.
+- `scripts/common/` reads `apps.json`, checks tags and hands build secrets to the build
+  for both workflows. `tagPrefix` in `apps.json` can be one prefix or a list, such as
+  `["v", "win-v"]`; a tag matching any of them releases.
   `scripts/mac/` holds the signing, notarizing, DMG and verification scripts, and
   `scripts/windows/` the build and signing scripts for Windows.
 - `skills/mac-app-release/` is the agent skill for setting apps up this way, on either
