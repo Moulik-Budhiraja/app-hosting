@@ -140,6 +140,15 @@ Windows, Electron (electron-updater, NSIS):
 Monorepo: set `"tagPrefix": "app/v"` and tag `app/v1.2.3`. If `apps.json` isn't at the
 repo root, pass `with: { directory: path }` to each job in `release.yml`.
 
+Build-time secrets: if `command` needs a secret, such as an OAuth client file the app
+bundles, put it in the repo's `production` environment and list it in `release.yml`
+with `with: { build-secrets: GOOGLE_OAUTH_CLIENT_BASE64 }`. Separate several names with
+spaces or commas, and pass the input on each platform's job that needs it. The build
+step gets each one as an environment variable of the same name and never sees the other
+secrets. The run fails before building if a listed secret isn't set, or if a name would
+replace a variable the workflow sets (`VERSION`, `BUILD`, `AZURE_*`, `APPLE_*`). For
+`release-local.sh`, export the variables in the shell first.
+
 ## Windows signing
 
 Windows installers are signed with Azure Artifact Signing (formerly Trusted Signing),
@@ -259,6 +268,8 @@ installer, so the installer must close the running app (or the app must quit thr
 - **Windows signing fails with 403 or "no credential".** Check the `AZURE_*` secrets,
   that the client secret hasn't expired, and that the app registration has the signer
   role on the account. Missing `.NET 8` means the setup-dotnet step didn't run.
+- **"build-secrets: X isn't set".** The secret is missing from the repo's `production`
+  environment and repo secrets, or `release.yml` doesn't pass `secrets: inherit`.
 - **"isn't signed" for an Electron installer.** `win.azureSignOptions` is missing or
   doesn't read the `AZURE_SIGNING_*` variables.
 - **Windows job stuck queued.** No runner has the labels in `runs-on`, or the repo is

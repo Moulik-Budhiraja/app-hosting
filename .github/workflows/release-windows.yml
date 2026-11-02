@@ -13,6 +13,8 @@
 # Everything app-specific comes from the repo's apps.json (builds.windows, see
 # DESIGN.md). Secrets live in the repo's "production" environment; `apps init`
 # sets them. Installers are signed with Azure Artifact Signing.
+# If the build command needs secrets of its own, list them with
+#   with: { build-secrets: GOOGLE_OAUTH_CLIENT_BASE64 }
 #
 # By default it runs on [self-hosted, windows]: a fresh Windows 11 x64 Hyper-V
 # VM per job, deleted afterwards, with Git, PowerShell 7, the Windows SDK and
@@ -44,6 +46,15 @@ on:
           for GitHub's hosted runner.
         type: string
         default: '["self-hosted", "windows"]'
+      build-secrets:
+        description: >-
+          Names of extra secrets the build command needs, separated by spaces,
+          commas or newlines, such as GOOGLE_OAUTH_CLIENT_BASE64. Each one comes
+          from the caller (secrets: inherit, including the production
+          environment) and reaches the build step as an environment variable of
+          the same name. The run fails if one isn't set.
+        type: string
+        default: ''
     secrets:
       APPS_TOKEN:
         required: false
@@ -159,8 +170,18 @@ jobs:
           AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
           AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
           AZURE_SIGNING_PUBLISHER: ${{ secrets.AZURE_SIGNING_PUBLISHER }}
+          # Only when the caller asks for build secrets. The wrapper hands the
+          # build just the named ones and drops these two variables.
+          APPS_BUILD_SECRETS: ${{ inputs.build-secrets }}
+          APPS_SECRETS_JSON: ${{ inputs.build-secrets != '' && toJSON(secrets) || '' }}
         run: |
-          & "$env:TOOLING/scripts/windows/build-release.ps1" apps.json
+          if ($env:APPS_BUILD_SECRETS) {
+            $pwsh = (Get-Process -Id $PID).Path
+            & node "$env:TOOLING/scripts/common/with-build-secrets.mjs" $pwsh -NoProfile -NonInteractive -File "$env:TOOLING/scripts/windows/build-release.ps1" apps.json
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            & "$env:TOOLING/scripts/windows/build-release.ps1" apps.json
+          }
 
       - name: Release notes
         id: notes

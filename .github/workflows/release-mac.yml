@@ -12,6 +12,8 @@
 #
 # Everything app-specific comes from the repo's apps.json (builds.mac, see DESIGN.md).
 # Secrets live in the repo's "production" environment; `apps init` sets them.
+# If the build command needs secrets of its own, list them with
+#   with: { build-secrets: GOOGLE_OAUTH_CLIENT_BASE64 }
 name: Release Mac app
 
 on:
@@ -28,6 +30,15 @@ on:
           workflow which ref it was called at.
         type: string
         default: main
+      build-secrets:
+        description: >-
+          Names of extra secrets the build command needs, separated by spaces,
+          commas or newlines, such as GOOGLE_OAUTH_CLIENT_BASE64. Each one comes
+          from the caller (secrets: inherit, including the production
+          environment) and reaches the build step as an environment variable of
+          the same name. The run fails if one isn't set.
+        type: string
+        default: ''
     secrets:
       APPLE_CERTIFICATE_BASE64:
         required: false
@@ -137,8 +148,16 @@ jobs:
           BUILD: ${{ steps.tag.outputs.build }}
           APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
           APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
+          # Only when the caller asks for build secrets. The wrapper hands the
+          # build just the named ones and drops these two variables.
+          APPS_BUILD_SECRETS: ${{ inputs.build-secrets }}
+          APPS_SECRETS_JSON: ${{ inputs.build-secrets != '' && toJSON(secrets) || '' }}
         run: |
-          "$TOOLING/scripts/mac/build-release.sh" apps.json | tee -a "$GITHUB_OUTPUT"
+          if [[ -n $APPS_BUILD_SECRETS ]]; then
+            node "$TOOLING/scripts/common/with-build-secrets.mjs" "$TOOLING/scripts/mac/build-release.sh" apps.json | tee -a "$GITHUB_OUTPUT"
+          else
+            "$TOOLING/scripts/mac/build-release.sh" apps.json | tee -a "$GITHUB_OUTPUT"
+          fi
 
       - name: Release notes
         id: notes

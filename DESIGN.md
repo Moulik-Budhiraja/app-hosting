@@ -415,6 +415,23 @@ Both workflows (`on: workflow_call`) take these inputs:
 - `tooling-ref`: the ref of `Moulik-Budhiraja/app-hosting` to take scripts and the CLI
   from. Default `main`. GitHub doesn't tell a called workflow its own ref, so a caller
   that pins `@<ref>` should pass the same ref.
+- `build-secrets`: names of extra secrets the build `command` needs, separated by
+  spaces, commas or newlines, such as `with: { build-secrets: GOOGLE_OAUTH_CLIENT_BASE64 }`.
+  Default empty. See below.
+
+`build-secrets` covers secrets the app bundles or uses at build time, such as an OAuth
+client file. They come from `secrets: inherit`, which includes the `production`
+environment's secrets because the job runs in that environment. When the input is set,
+the build step gets `toJSON(secrets)` and runs the build through
+`scripts/common/with-build-secrets.mjs`. That script starts `build-release.sh` (Mac) or
+`build-release.ps1` (Windows) with each listed secret as an environment variable of the
+same name, and without the JSON, so the build never sees the other secrets. The run
+fails before building if a listed secret is missing or empty, if a name isn't a valid
+variable name, or if it would replace a variable the build step already sets (such as
+`VERSION` or `AZURE_CLIENT_ID`). Names match secrets case-insensitively. GitHub masks
+the values in logs, and the script prints only the names. Only the build step gets
+them, not publishing. With the input empty, the build step runs as it did before.
+`release-local.sh` takes the same variables from the shell that runs it.
 
 Both run one job with `environment: production`, `timeout-minutes: 90` and a
 non-cancelling concurrency group per repo and platform, and share these steps:
