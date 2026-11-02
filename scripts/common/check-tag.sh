@@ -2,13 +2,13 @@
 # Checks a release tag and prints version= and build= lines ($GITHUB_OUTPUT
 # format). The tag must be <prefix>X.Y.Z and point at a commit on origin/main.
 #
-#   scripts/mac/check-tag.sh <tag> [prefix] >> "$GITHUB_OUTPUT"
+#   scripts/common/check-tag.sh <tag> [prefix] >> "$GITHUB_OUTPUT"
 #
 # Run inside the app repo's checkout. The build follows DESIGN.md:
 # X*100000000 + Y*100000 + Z*100, so 1.2.3 is 100200300.
 # SKIP_MAIN_CHECK=1 skips the origin/main check (local dry runs).
 set -euo pipefail
-# shellcheck source=scripts/mac/lib.sh
+# shellcheck source=scripts/common/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 tag=${1:?usage: check-tag.sh <tag> [prefix]}

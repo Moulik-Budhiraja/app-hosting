@@ -4,14 +4,9 @@
 #   # shellcheck source=scripts/mac/lib.sh
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-die() {
-  echo "error: $*" >&2
-  exit 1
-}
-
-note() {
-  echo "==> $*" >&2
-}
+# die and note
+# shellcheck source=scripts/common/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../common/lib.sh"
 
 # retry <attempts> <command...>
 # Apple's timestamp and notary services fail now and then, so signing and

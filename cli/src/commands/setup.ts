@@ -6,10 +6,16 @@ import {
   appFileExists,
   checkAppName,
   defaultBuildSection,
+  feedName,
+  isPlatform,
+  PLATFORMS,
+  platformsOf,
   readAppFile,
   titleFromName,
   writeAppFile,
   type AppFile,
+  type Builds,
+  type Platform,
   type Updater,
 } from "../appfile.js";
 import { getRemote, loadConfig, saveConfig } from "../config.js";
@@ -21,41 +27,81 @@ import { SPARKLE_SERVICE, sparkleAccount } from "../secrets.js";
 export const ENVIRONMENT = "production";
 export const WORKFLOW_PATH = ".github/workflows/release.yml";
 
-export function workflowTemplate(tagPrefix: string): string {
+/** The app repo's release.yml: one job per platform, each calling that platform's reusable workflow. */
+export function workflowTemplate(tagPrefix: string, platforms: readonly Platform[] = ["mac"]): string {
+  const jobs = platforms.map((platform) => `  ${platform}:
+    uses: Moulik-Budhiraja/app-hosting/.github/workflows/release-${platform}.yml@main
+    secrets: inherit
+`);
   return `name: Release
 on:
   push:
     tags: ['${tagPrefix}*']
 jobs:
-  release:
-    uses: Moulik-Budhiraja/app-hosting/.github/workflows/release-mac.yml@main
-    secrets: inherit
-`;
+${jobs.join("")}`;
 }
 
-export function feedUrl(file: Pick<AppFile, "app" | "remote" | "updater">): string {
-  const base = `${file.remote.url}/${file.app}`;
-  return file.updater === "sparkle" ? `${base}/appcast.xml` : `${base}/latest-mac.yml`;
+export function feedUrl(file: Pick<AppFile, "app" | "remote" | "updater">, platform: Platform = "mac"): string {
+  return `${file.remote.url}/${file.app}/${feedName(file.updater, platform)}`;
 }
 
-/** What the app itself must contain to find its updates. */
-export function integrationLines(file: Pick<AppFile, "app" | "remote" | "updater">, publicKey?: string): string[] {
+/** Each built platform's feed URL. */
+export function feedUrls(file: Pick<AppFile, "app" | "remote" | "updater" | "builds">): Partial<Record<Platform, string>> {
+  return Object.fromEntries(platformsOf(file).map((platform) => [platform, feedUrl(file, platform)]));
+}
+
+/** What the app itself must contain to find its updates, for each platform it builds. */
+export function integrationLines(file: Pick<AppFile, "app" | "remote" | "updater" | "builds">, publicKey?: string): string[] {
   const base = `${file.remote.url}/${file.app}`;
+  const platforms = platformsOf(file);
+  const key = publicKey ?? "(run apps init on the Mac that ran apps create)";
+  const lines: string[] = [];
   if (file.updater === "sparkle") {
-    return [
-      "The app needs Sparkle, with these Info.plist keys:",
-      `  SUFeedURL      ${base}/appcast.xml`,
-      `  SUPublicEDKey  ${publicKey ?? "(run apps init on the Mac that ran apps create)"}`,
-      "and an SPUStandardUpdaterController started at launch.",
-      `Download page: ${base}/`,
-    ];
+    if (platforms.includes("mac")) {
+      lines.push(
+        "On macOS the app needs Sparkle, with these Info.plist keys:",
+        `  SUFeedURL      ${feedUrl(file, "mac")}`,
+        `  SUPublicEDKey  ${key}`,
+        "and an SPUStandardUpdaterController started at launch.",
+      );
+    }
+    if (platforms.includes("windows")) {
+      lines.push(
+        "On Windows the app needs WinSparkle, set up at launch with:",
+        `  win_sparkle_set_appcast_url("${feedUrl(file, "windows")}")`,
+        `  win_sparkle_set_eddsa_public_key("${key}")`,
+        "  win_sparkle_init()",
+        "and must report its version as X.Y.Z (its FileVersion, or win_sparkle_set_app_details).",
+      );
+    }
+  } else {
+    lines.push(
+      "Point electron-builder at the remote:",
+      `  publish: { provider: generic, url: ${base}/ }`,
+      "and call autoUpdater.checkForUpdatesAndNotify() from electron-updater.",
+    );
+    if (platforms.includes("windows")) {
+      lines.push(
+        "On Windows, build an NSIS installer signed with Artifact Signing:",
+        "  win: { target: nsis, azureSignOptions: { endpoint, codeSigningAccountName, certificateProfileName, publisherName } }",
+        "  filled from AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE and AZURE_SIGNING_PUBLISHER",
+        "  (use a JS config, such as electron-builder.config.js, to read them from process.env).",
+      );
+    }
   }
-  return [
-    "Point electron-builder at the remote:",
-    `  publish: { provider: generic, url: ${base}/ }`,
-    "and call autoUpdater.checkForUpdatesAndNotify() from electron-updater.",
-    `Download page: ${base}/`,
-  ];
+  lines.push(`Download page: ${base}/`);
+  return lines;
+}
+
+/** --platforms mac,windows → the platforms, in a fixed order. Defaults to macOS. */
+export function parsePlatforms(value: string | undefined): Platform[] {
+  if (value === undefined) return ["mac"];
+  const names = value.split(",").map((item) => item.trim()).filter(Boolean);
+  if (!names.length) throw usage("--platforms needs at least one of mac and windows.");
+  for (const name of names) {
+    if (!isPlatform(name)) throw usage(`"${name}" isn't a platform. Use --platforms mac, windows or mac,windows.`);
+  }
+  return PLATFORMS.filter((platform) => names.includes(platform));
 }
 
 async function sparkleKey(deps: Deps, remote: string, app: string): Promise<string | null> {
@@ -68,10 +114,10 @@ export async function createCommand(
   deps: Deps,
   out: Out,
   positionals: string[],
-  options: { dir: string; remote?: string; updater?: string; title?: string; kind?: string },
+  options: { dir: string; remote?: string; updater?: string; title?: string; kind?: string; platforms?: string },
 ): Promise<void> {
   if (positionals.length !== 1) {
-    throw usage("Usage: apps create <app> --remote <remote> --updater sparkle|electron [--title T] [--kind native|electron]");
+    throw usage("Usage: apps create <app> --remote <remote> --updater sparkle|electron [--title T] [--kind native|electron] [--platforms mac,windows]");
   }
   const name = checkAppName(positionals[0]!);
   if (!options.remote) throw usage("Pass --remote <remote>. Each app lives on exactly one remote.");
@@ -84,6 +130,7 @@ export async function createCommand(
   if ((kind === "native") !== (updater === "sparkle")) {
     throw usage("Native builds use --updater sparkle; electron builds use --updater electron.");
   }
+  const platforms = parsePlatforms(options.platforms);
   if (await appFileExists(options.dir)) {
     throw new CliError(`${join(options.dir, "apps.json")} already exists. This repo already has an app.`, EXIT.usage, "APPS_JSON_EXISTS");
   }
@@ -134,7 +181,7 @@ export async function createCommand(
     remote: { name: options.remote, url: remote.url },
     updater,
     tagPrefix: "v",
-    build: defaultBuildSection(name, title, kind),
+    builds: Object.fromEntries(platforms.map((platform) => [platform, defaultBuildSection(name, title, kind, platform)])) as Builds,
   };
   const path = await writeAppFile(options.dir, file);
 
@@ -143,12 +190,12 @@ export async function createCommand(
       `${adopted ? "Found" : "Created"} ${name} on ${options.remote} and wrote ${path}.`,
       "",
       "Next:",
-      `  1. Check the "build" section of apps.json matches how this app builds.`,
+      `  1. Check the "builds" section of apps.json matches how this app builds.`,
       "  2. Run apps init to connect the GitHub repo.",
       "",
       ...integrationLines(file, publicKey),
     ],
-    { app: { name: app.name, title: app.title, updater: app.updater }, adopted, appsJson: path, file, sparklePublicKey: publicKey ?? null, feed: feedUrl(file) },
+    { app: { name: app.name, title: app.title, updater: app.updater }, adopted, appsJson: path, file, sparklePublicKey: publicKey ?? null, feed: feedUrl(file, platforms[0]), feeds: feedUrls(file) },
   );
 }
 
@@ -199,6 +246,55 @@ async function findSigningFiles(dir: string, keyId?: string): Promise<SigningFil
   return { dir, certificate, password, apiKey, keyId: keys[0]!.slice("AuthKey_".length, -".p8".length) };
 }
 
+/** Artifact Signing settings for Windows builds, from <signing-dir>/azure-signing.json. */
+export const AZURE_SIGNING_FILE = "azure-signing.json";
+const AZURE_FIELDS = {
+  tenantId: "AZURE_TENANT_ID",
+  clientId: "AZURE_CLIENT_ID",
+  clientSecret: "AZURE_CLIENT_SECRET",
+  endpoint: "AZURE_SIGNING_ENDPOINT",
+  account: "AZURE_SIGNING_ACCOUNT",
+  profile: "AZURE_SIGNING_PROFILE",
+  publisher: "AZURE_SIGNING_PUBLISHER",
+} as const;
+
+interface AzureSigning {
+  path: string;
+  /** Secret name → value. */
+  secrets: Record<string, string>;
+}
+
+async function readAzureSigning(dir: string): Promise<AzureSigning> {
+  const path = join(dir, AZURE_SIGNING_FILE);
+  const shape = `{${Object.keys(AZURE_FIELDS).map((key) => `"${key}"`).join(", ")}}`;
+  let content: string;
+  try {
+    content = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new CliError(
+      `Missing ${path}. Windows builds sign with Artifact Signing; put its settings there as ${shape}, or pass --signing-dir.`,
+      EXIT.usage,
+      "MISSING_SIGNING_FILES",
+    );
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(content) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+  } catch {
+    throw new CliError(`${path} isn't a JSON object like ${shape}.`, EXIT.usage, "BAD_SIGNING_FILE");
+  }
+  const missing = Object.keys(AZURE_FIELDS).filter((key) => typeof parsed[key] !== "string" || !(parsed[key] as string).trim());
+  if (missing.length) {
+    throw new CliError(`${path} is missing ${missing.join(", ")}.`, EXIT.usage, "BAD_SIGNING_FILE");
+  }
+  const secrets = Object.fromEntries(
+    Object.entries(AZURE_FIELDS).map(([key, secret]) => [secret, (parsed[key] as string).trim()]),
+  );
+  return { path, secrets };
+}
+
 export interface InitOptions {
   dir: string;
   repo?: string;
@@ -218,22 +314,26 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
   }
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw usage(`"${repo}" isn't a GitHub repo. Pass --repo owner/name.`);
 
-  const signing = await findSigningFiles(expandHome(options.signingDir ?? "~/.config/predictor-release", deps), options.keyId);
+  const platforms = platformsOf(file);
+  const signingDir = expandHome(options.signingDir ?? "~/.config/predictor-release", deps);
+  const signing = platforms.includes("mac") ? await findSigningFiles(signingDir, options.keyId) : null;
+  const azure = platforms.includes("windows") ? await readAzureSigning(signingDir) : null;
 
-  // The macos-ephemeral runner serves public repos only from an allowlist, and
-  // only if a fork pull request can't run workflows on it without approval.
+  // Release jobs run on self-hosted runners, so a public repo must not let fork
+  // pull requests run workflows without approval. Both runner pools also serve
+  // public repos only from an allowlist.
   const visibility = JSON.parse(
     (await deps.gh.run(["api", `repos/${repo}`, "--jq", "{private: .private}"])) || "{}",
   ) as { private?: boolean };
   const isPublic = visibility.private === false;
 
   let issuer = options.appleIssuerId?.trim() || config.appleIssuerId;
-  let saveIssuer = Boolean(options.appleIssuerId?.trim() && options.appleIssuerId.trim() !== config.appleIssuerId);
-  if (!issuer && !options.dryRun) {
+  let saveIssuer = Boolean(signing && options.appleIssuerId?.trim() && options.appleIssuerId.trim() !== config.appleIssuerId);
+  if (signing && !issuer && !options.dryRun) {
     issuer = await deps.prompt.line("App Store Connect issuer ID (Users and Access › Integrations › Keys): ");
     saveIssuer = true;
   }
-  if (!issuer && !options.dryRun) throw usage("An App Store Connect issuer ID is required. Pass --apple-issuer-id.");
+  if (signing && !issuer && !options.dryRun) throw usage("An App Store Connect issuer ID is required. Pass --apple-issuer-id.");
 
   let privateKey: string | null = null;
   let publicKey: string | undefined;
@@ -254,11 +354,8 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
   const workflowPath = join(options.dir, WORKFLOW_PATH);
   const writeWorkflow = !(await exists(workflowPath));
   const secretNames = [
-    "APPLE_CERTIFICATE_BASE64",
-    "APPLE_CERTIFICATE_PASSWORD",
-    "APPLE_API_KEY_BASE64",
-    "APPLE_KEY_ID",
-    "APPLE_ISSUER_ID",
+    ...(signing ? ["APPLE_CERTIFICATE_BASE64", "APPLE_CERTIFICATE_PASSWORD", "APPLE_API_KEY_BASE64", "APPLE_KEY_ID", "APPLE_ISSUER_ID"] : []),
+    ...(azure ? Object.keys(azure.secrets) : []),
     "APPS_TOKEN",
     ...(file.updater === "sparkle" ? ["SPARKLE_PRIVATE_KEY"] : []),
   ];
@@ -268,12 +365,15 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
     remote: file.remote.name,
     environment: ENVIRONMENT,
     tagPolicy: policy,
+    platforms,
     secrets: secretNames,
-    signingDir: signing.dir,
-    appleKeyId: signing.keyId,
+    signingDir,
+    appleKeyId: signing?.keyId ?? null,
+    azureSigning: azure?.path ?? null,
     publishTokenLabel: label,
     workflow: { path: workflowPath, write: writeWorkflow },
-    feed: feedUrl(file),
+    feed: feedUrl(file, platforms[0]),
+    feeds: feedUrls(file),
     sparklePublicKey: publicKey ?? null,
   };
 
@@ -284,10 +384,11 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
         `  • create or update the "${ENVIRONMENT}" environment on ${repo}, deployable only from tags matching ${policy}`,
         `  • create a publish token for ${file.app} on ${file.remote.name} labelled "${label}" (and revoke older ones with that label)`,
         `  • set environment secrets: ${secretNames.join(", ")}`,
-        `    (Apple files from ${signing.dir}, key ${signing.keyId}${issuer ? "" : "; would ask for the issuer ID"})`,
+        ...(signing ? [`    (Apple files from ${signing.dir}, key ${signing.keyId}${issuer ? "" : "; would ask for the issuer ID"})`] : []),
+        ...(azure ? [`    (Artifact Signing settings from ${azure.path})`] : []),
         writeWorkflow ? `  • write ${WORKFLOW_PATH}` : `  • keep the existing ${WORKFLOW_PATH}`,
         ...(isPublic ? [`  • require approval for workflows from every external contributor's fork pull request`] : []),
-        ...(isPublic ? ["", ...publicRepoLines(repo)] : []),
+        ...(isPublic ? ["", ...publicRepoLines(repo, platforms)] : []),
         "",
         ...integrationLines(file, publicKey),
       ],
@@ -337,11 +438,16 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
   const previous = (await api.listTokens(file.app)).filter((token) => token.label === label);
   const created = await api.createToken(file.app, label);
   const values: Record<string, string> = {
-    APPLE_CERTIFICATE_BASE64: (await readFile(signing.certificate)).toString("base64"),
-    APPLE_CERTIFICATE_PASSWORD: (await readFile(signing.password, "utf8")).replace(/[\r\n]+/g, ""),
-    APPLE_API_KEY_BASE64: (await readFile(signing.apiKey)).toString("base64"),
-    APPLE_KEY_ID: signing.keyId,
-    APPLE_ISSUER_ID: issuer!,
+    ...(signing
+      ? {
+        APPLE_CERTIFICATE_BASE64: (await readFile(signing.certificate)).toString("base64"),
+        APPLE_CERTIFICATE_PASSWORD: (await readFile(signing.password, "utf8")).replace(/[\r\n]+/g, ""),
+        APPLE_API_KEY_BASE64: (await readFile(signing.apiKey)).toString("base64"),
+        APPLE_KEY_ID: signing.keyId,
+        APPLE_ISSUER_ID: issuer!,
+      }
+      : {}),
+    ...(azure ? azure.secrets : {}),
     APPS_TOKEN: created.token,
     ...(privateKey ? { SPARKLE_PRIVATE_KEY: privateKey } : {}),
   };
@@ -360,7 +466,7 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
 
   if (writeWorkflow) {
     await mkdir(join(options.dir, ".github", "workflows"), { recursive: true });
-    await writeFile(workflowPath, workflowTemplate(file.tagPrefix), { flag: "wx" });
+    await writeFile(workflowPath, workflowTemplate(file.tagPrefix, platforms), { flag: "wx" });
   }
 
   out.result(
@@ -372,18 +478,24 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
       previous.length ? `  Revoked ${previous.length} older publish token${previous.length === 1 ? "" : "s"}.` : "",
       isPublic ? `  Fork pull requests now need your approval before their workflows run.` : "",
       "",
-      ...(isPublic ? [...publicRepoLines(repo), ""] : []),
+      ...(isPublic ? [...publicRepoLines(repo, platforms), ""] : []),
       ...integrationLines(file, publicKey),
     ].filter((line, index, lines) => line !== "" || lines[index - 1] !== ""),
     { dryRun: false, ...summary, tokenId: created.id, revokedTokens: previous.map((token) => token.id) },
   );
 }
 
-function publicRepoLines(repo: string): string[] {
-  return [
-    `${repo} is public. The macos-ephemeral runner on ralph only takes jobs from private repos and`,
-    `from the public repos in its publicRepositories list, so add ${repo} to the "personal"`,
-    `source in ralph's controller config (see Proletic/macos-runner) before the first release.`,
-    `Until then the release job stays queued.`,
-  ];
+function publicRepoLines(repo: string, platforms: Platform[]): string[] {
+  const lines = [`${repo} is public. The release runners only take jobs from private repos and allowlisted public ones.`];
+  if (platforms.includes("mac")) {
+    lines.push(
+      `  macOS: add ${repo} to the publicRepositories list of the "personal" source in ralph's`,
+      `  controller config (see Proletic/macos-runner).`,
+    );
+  }
+  if (platforms.includes("windows")) {
+    lines.push(`  Windows: add ${repo} to the Windows runner controller's public-repo allowlist.`);
+  }
+  lines.push(`Until then the release jobs stay queued.`);
+  return lines;
 }

@@ -37,6 +37,7 @@ describe('apps server', () => {
     assert.equal(created.status, 201);
     const body = await json(created);
     assert.equal(body.urls.feed, `${PUBLIC_URL}/draw/appcast.xml`);
+    assert.deepEqual(body.urls.feeds, { mac: `${PUBLIC_URL}/draw/appcast.xml`, windows: `${PUBLIC_URL}/draw/appcast-windows.xml` });
 
     assert.equal((await api(h, 'POST', '/api/apps', { name: 'draw', updater: 'sparkle', sparklePublicKey: keys.publicKey })).status, 409);
     assert.equal((await api(h, 'POST', '/api/apps', { name: 'api', updater: 'electron' })).status, 400);
@@ -87,6 +88,9 @@ describe('apps server', () => {
     assert.equal(release.build, 100000000);
     assert.equal(release.files[0].sha512, sha512(dmg1));
     assert.equal(release.files[0].url, `${PUBLIC_URL}/draw/releases/1.0.0/ScreenDraw-1.0.0.dmg`);
+    assert.equal(release.files[0].platform, 'mac');
+    assert.equal(release.files[0].edSignature, keys.sign(dmg1));
+    assert.equal(release.platforms.mac.minimumSystemVersion, '13.0');
 
     const second = await publish(h, 'draw', { version: '1.1.0', notes: 'Faster', edSignature: keys.sign(dmg2) }, [
       { name: 'ScreenDraw-1.1.0.dmg', role: 'dmg', data: dmg2 },
@@ -235,7 +239,7 @@ describe('apps server', () => {
     const html = await page.text();
     assert.match(html, /<h1>ScreenDraw<\/h1>/);
     assert.match(html, /<p class="meta">Version 2\.0\.0 · [A-Z][a-z]+ \d{1,2}, \d{4}<\/p>/);
-    assert.match(html, /href="download"/);
+    assert.match(html, /href="download\/mac"/);
     assert.match(html, /Earlier versions/);
     assert.match(html, /class="tile"[^>]*>S</, 'no icon yet, so the initial stands in');
     assert.doesNotMatch(html, /text-transform:uppercase/);
@@ -250,7 +254,7 @@ describe('apps server', () => {
     assert.match(index, /<span class="name">other<\/span><span class="sub">No releases yet<\/span>/);
     const other = await (await fetch(`${h.base}/other/`)).text();
     assert.match(other, /No releases yet/);
-    assert.doesNotMatch(other, /href="download"/);
+    assert.doesNotMatch(other, /href="download/);
     assert.equal((await fetch(`${h.base}/missing/`)).status, 404);
     assert.equal((await fetch(`${h.base}/other/download`)).status, 404, 'no releases yet');
   });

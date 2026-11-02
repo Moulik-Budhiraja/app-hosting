@@ -11,7 +11,7 @@ import { spawnGh } from "./gh.js";
 import { terminalPrompter } from "./prompt.js";
 import { keyringStore } from "./secrets.js";
 
-const ROOT_HELP = `apps: ship auto-updating Mac apps to an apps remote.
+const ROOT_HELP = `apps: ship auto-updating macOS and Windows apps to an apps remote.
 
 Remotes (like git: each app lives on one remote):
   apps remote add <name> <url>     Add a remote, e.g. apps remote add moulik https://apps.moulik.dev
@@ -22,15 +22,20 @@ Remotes (like git: each app lives on one remote):
 
 Setting up an app (run in the app's repo):
   apps create <app> --remote <r> --updater sparkle|electron [--title T] [--kind native|electron]
-                                   Register the app and write apps.json
+              [--platforms mac,windows]
+                                   Register the app and write apps.json (platforms default to mac)
   apps init [--repo owner/name] [--signing-dir dir] [--apple-issuer-id id] [--key-id id] [--dry-run]
                                    Connect the GitHub repo: environment, secrets, release workflow
 
 Releasing:
-  apps publish --version X.Y.Z --dmg <path> [--zip <path>] [--blockmap <path>]
-               [--build N] [--notes-file <path>] [--minimum-system-version 13.0] [--icon <png>]
+  apps publish --version X.Y.Z [--platform mac|windows] [--build N] [--notes-file <path>]
+               [--minimum-system-version v] [--icon <png>] and the platform's files:
+               macOS:   --dmg <path> [--zip <path>] [--blockmap <path>]
+               Windows: --installer <path> [--blockmap <path>]
+                                   --platform defaults to windows with --installer, else mac
   apps icon <icon.png>             Set the icon on the app's download page (--remove to drop it, admin)
-  apps status [--expect X.Y.Z]     Latest release and whether the live feed matches
+  apps status [--expect X.Y.Z] [--platform p]
+                                   Latest release per platform and whether the live feeds match
   apps releases [--app a --remote r]
   apps withdraw <version>          Take a release out of the feed (admin)
   apps restore <version>           Put it back (admin)
@@ -63,7 +68,7 @@ const COMMAND_OPTIONS = {
   remote: {},
   login: { "token-stdin": { type: "boolean" } },
   logout: {},
-  create: { remote: { type: "string" }, updater: { type: "string" }, title: { type: "string" }, kind: { type: "string" } },
+  create: { remote: { type: "string" }, updater: { type: "string" }, title: { type: "string" }, kind: { type: "string" }, platforms: { type: "string" } },
   init: {
     repo: { type: "string" },
     "signing-dir": { type: "string" },
@@ -73,6 +78,8 @@ const COMMAND_OPTIONS = {
   },
   publish: {
     version: { type: "string" },
+    platform: { type: "string" },
+    installer: { type: "string" },
     build: { type: "string" },
     "notes-file": { type: "string" },
     dmg: { type: "string" },
@@ -81,7 +88,7 @@ const COMMAND_OPTIONS = {
     "minimum-system-version": { type: "string" },
     icon: { type: "string" },
   },
-  status: { expect: { type: "string" } },
+  status: { expect: { type: "string" }, platform: { type: "string" } },
   releases: TARGET,
   withdraw: TARGET,
   restore: TARGET,
@@ -156,7 +163,7 @@ export async function run(argv: string[], deps: Deps): Promise<number> {
         await logoutCommand(deps, out, positionals);
         break;
       case "create":
-        await createCommand(deps, out, positionals, { dir, remote: str("remote"), updater: str("updater"), title: str("title"), kind: str("kind") });
+        await createCommand(deps, out, positionals, { dir, remote: str("remote"), updater: str("updater"), title: str("title"), kind: str("kind"), platforms: str("platforms") });
         break;
       case "init":
         if (positionals.length) throw usage("apps init takes no arguments.");
@@ -174,18 +181,20 @@ export async function run(argv: string[], deps: Deps): Promise<number> {
         await publishCommand(deps, out, {
           dir,
           version: str("version"),
+          platform: str("platform"),
           build: str("build"),
           notesFile: str("notes-file"),
           dmg: str("dmg"),
           zip: str("zip"),
           blockmap: str("blockmap"),
+          installer: str("installer"),
           minimumSystemVersion: str("minimum-system-version"),
           icon: str("icon"),
         });
         break;
       case "status":
         if (positionals.length) throw usage("apps status takes no arguments.");
-        return await statusCommand(deps, out, { dir, expect: str("expect") });
+        return await statusCommand(deps, out, { dir, expect: str("expect"), platform: str("platform") });
       case "releases":
         if (positionals.length) throw usage("Usage: apps releases [--app a --remote r]");
         await releasesCommand(deps, out, { dir, app: str("app"), remote: str("remote") });

@@ -4,8 +4,10 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { defaultBuildSection, expandPath, validateAppFile } from "../src/appfile.js";
+import { defaultBuildSection, expandPath, feedName, platformsOf, validateAppFile } from "../src/appfile.js";
 import { feedVersion } from "../src/commands/manage.js";
+import { publishPlatform } from "../src/commands/publish.js";
+import { parsePlatforms, workflowTemplate } from "../src/commands/setup.js";
 import { loadConfig, normalizeUrl, saveConfig } from "../src/config.js";
 import { generateSparkleKeys, publicKeyFor, readPrivateKey, signArchive, verifyArchive } from "../src/sparkle.js";
 import { compareVersions, defaultBuild, parseVersion } from "../src/version.js";
@@ -29,11 +31,13 @@ const nativeFile = {
   build: { kind: "native", command: "./scripts/build.sh", app: "build/ScreenDraw.app", entitlements: null },
 };
 
-test("apps.json validation fills defaults and normalizes", () => {
+test("apps.json validation fills defaults and normalizes; a top-level build is the macOS build", () => {
   const file = validateAppFile(nativeFile);
   assert.equal(file.tagPrefix, "v");
   assert.equal(file.remote.url, "https://apps.moulik.dev");
-  assert.deepEqual(file.build, {
+  assert.deepEqual(platformsOf(file), ["mac"]);
+  assert.equal(file.builds.windows, undefined);
+  assert.deepEqual(file.builds.mac, {
     kind: "native", command: "./scripts/build.sh", app: "build/ScreenDraw.app", entitlements: null, dmgName: "ScreenDraw",
   });
 });
@@ -54,10 +58,85 @@ test("electron apps.json and the {version} placeholder", () => {
   const build = defaultBuildSection("proactive-agent", "Proactive Agent", "electron");
   const file = validateAppFile({ app: "proactive-agent", remote: { name: "proletic", url: "https://apps.proletic.co" }, updater: "electron", tagPrefix: "app/v", build });
   assert.equal(file.tagPrefix, "app/v");
-  assert.equal(file.build.kind, "electron");
-  if (file.build.kind === "electron") {
-    assert.equal(expandPath(file.build.zip, "1.2.3"), "dist/Proactive-Agent-1.2.3-mac.zip");
+  assert.equal(file.builds.mac!.kind, "electron");
+  if (file.builds.mac!.kind === "electron") {
+    assert.equal(expandPath(file.builds.mac!.zip, "1.2.3"), "dist/Proactive-Agent-1.2.3-mac.zip");
   }
+});
+
+const windowsNative = { kind: "native", command: "./scripts/build.ps1", installer: "build/ScreenDraw-Setup-{version}.exe" };
+const { build: _legacy, ...base } = nativeFile;
+
+test("apps.json builds: both platforms, Windows fields and defaults", () => {
+  const file = validateAppFile({
+    ...base,
+    builds: {
+      mac: nativeFile.build,
+      windows: { ...windowsNative, minimumSystemVersion: "10.0.17763", icon: "assets/icon.png" },
+    },
+  });
+  assert.deepEqual(platformsOf(file), ["mac", "windows"]);
+  assert.deepEqual(file.builds.windows, { ...windowsNative, minimumSystemVersion: "10.0.17763", icon: "assets/icon.png" });
+
+  const windowsOnly = validateAppFile({ ...base, builds: { windows: { ...windowsNative, installer: "out/Setup.msi" } } });
+  assert.deepEqual(platformsOf(windowsOnly), ["windows"]);
+
+  const electron = defaultBuildSection("proactive-agent", "Proactive Agent", "electron", "windows");
+  assert.deepEqual(electron, {
+    kind: "electron",
+    command: "npm run build:win",
+    installer: "dist/Proactive-Agent-Setup-{version}.exe",
+    blockmap: "dist/Proactive-Agent-Setup-{version}.exe.blockmap",
+  });
+  const parsed = validateAppFile({ ...base, updater: "electron", builds: { windows: electron } });
+  assert.deepEqual(parsed.builds.windows, electron);
+  assert.deepEqual(defaultBuildSection("screen-draw", "Screen Draw", "native", "windows"), {
+    kind: "native", command: "./scripts/build.ps1", installer: "build/ScreenDraw-Setup-{version}.exe",
+  });
+});
+
+test("apps.json builds: validation errors", () => {
+  const withWindows = (windows: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    validateAppFile({ ...base, ...extra, builds: { windows } });
+  assert.throws(() => validateAppFile({ ...nativeFile, builds: { mac: nativeFile.build } }), /use "builds" only/);
+  assert.throws(() => validateAppFile(base), /builds is required/);
+  assert.throws(() => validateAppFile({ ...base, builds: {} }), /needs a "mac" or "windows" build/);
+  assert.throws(() => validateAppFile({ ...base, builds: { linux: windowsNative } }), /builds\.linux isn't a platform/);
+  assert.throws(() => withWindows({ ...windowsNative, installer: "build/Setup.zip" }), /builds\.windows\.installer must end in \.exe or \.msi/);
+  assert.throws(() => withWindows({ ...windowsNative, kind: "electron", installer: "dist/Setup.msi" }, { updater: "electron" }), /\.exe \(an NSIS installer\)/);
+  assert.throws(() => withWindows({ ...windowsNative, kind: "electron" }), /needs updater "electron"/);
+  assert.throws(() => withWindows(windowsNative, { updater: "electron" }), /needs updater "sparkle"/);
+  assert.throws(() => withWindows({ ...windowsNative, blockmap: "x.blockmap" }), /only for electron builds/);
+  assert.throws(
+    () => withWindows({ kind: "electron", command: "x", installer: "dist/App-{version}.exe", blockmap: "dist/App.exe.blockmap" }, { updater: "electron" }),
+    /must be named App-\{version\}\.exe\.blockmap/,
+  );
+  assert.throws(() => withWindows({ ...windowsNative, minimumSystemVersion: "Windows 10" }), /look like 10\.0/);
+  assert.throws(() => withWindows({ ...windowsNative, installer: "../Setup.exe" }), /inside the repo/);
+  assert.throws(() => withWindows({ ...windowsNative, installer: "C:\\out\\Setup.exe" }), /inside the repo/);
+  assert.throws(() => withWindows({ ...windowsNative, icon: "/tmp/icon.png" }), /builds\.windows\.icon must be a path inside the repo/);
+  assert.throws(() => withWindows({ ...windowsNative, command: "" }), /builds\.windows\.command/);
+});
+
+test("feeds, platforms and the release workflow template", () => {
+  assert.equal(feedName("sparkle", "mac"), "appcast.xml");
+  assert.equal(feedName("sparkle", "windows"), "appcast-windows.xml");
+  assert.equal(feedName("electron", "mac"), "latest-mac.yml");
+  assert.equal(feedName("electron", "windows"), "latest.yml");
+  assert.deepEqual(parsePlatforms(undefined), ["mac"]);
+  assert.deepEqual(parsePlatforms("windows, mac"), ["mac", "windows"]);
+  assert.throws(() => parsePlatforms("linux"), /isn't a platform/);
+  assert.throws(() => parsePlatforms(","), /at least one/);
+  assert.equal(publishPlatform({}), "mac");
+  assert.equal(publishPlatform({ installer: "Setup.exe" }), "windows");
+  assert.equal(publishPlatform({ platform: "mac", installer: "Setup.exe" }), "mac");
+  assert.throws(() => publishPlatform({ platform: "win" }), /mac or windows/);
+
+  const both = workflowTemplate("app/v", ["mac", "windows"]);
+  assert.match(both, /tags: \['app\/v\*'\]/);
+  assert.match(both, /  mac:\n    uses: Moulik-Budhiraja\/app-hosting\/\.github\/workflows\/release-mac\.yml@main\n    secrets: inherit\n/);
+  assert.match(both, /  windows:\n    uses: Moulik-Budhiraja\/app-hosting\/\.github\/workflows\/release-windows\.yml@main\n    secrets: inherit\n/);
+  assert.doesNotMatch(workflowTemplate("v", ["windows"]), /release-mac/);
 });
 
 test("Sparkle keys: 32-byte seed, raw public key, sign and verify", () => {
@@ -115,4 +194,6 @@ test("feed versions are read from both feed formats", () => {
   assert.equal(feedVersion("sparkle", "<rss><channel></channel></rss>"), null);
   assert.equal(feedVersion("electron", "version: 0.4.21\nfiles: []\n"), "0.4.21");
   assert.equal(feedVersion("electron", "version: '0.4.21'\n"), "0.4.21");
+  assert.equal(feedVersion("electron", "version: \"1.2.3\"\nfiles:\n  - url: \"releases/1.2.3/App-Setup-1.2.3.exe\"\n"), "1.2.3");
+  assert.equal(feedVersion("sparkle", "<item><sparkle:version>1.2.3</sparkle:version><sparkle:shortVersionString>1.2.3</sparkle:shortVersionString></item>"), "1.2.3");
 });

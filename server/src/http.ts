@@ -43,11 +43,12 @@ export function sendNoContent(res: ServerResponse): void {
   res.end();
 }
 
-export function sendHtml(res: ServerResponse, status: number, html: string): void {
+export function sendHtml(res: ServerResponse, status: number, html: string, headers: OutgoingHttpHeaders = {}): void {
   send(res, status, html, {
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-cache',
     'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    ...headers,
   });
 }
 

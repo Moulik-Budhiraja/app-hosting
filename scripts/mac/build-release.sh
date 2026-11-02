@@ -31,7 +31,7 @@ export VERSION BUILD
 require_keychain
 skip_notarize=${SKIP_NOTARIZE:-0}
 
-settings=$("$here/read-config.sh" "$config")
+settings=$("$here/../common/read-config.sh" "$config" mac)
 setting() {
   local line
   line=$(grep -m1 "^$1=" <<<"$settings" || true)

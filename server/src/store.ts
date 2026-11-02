@@ -5,7 +5,14 @@ import { HttpError } from './http.ts';
 import { compareVersions, isVersion } from './versions.ts';
 
 export type Updater = 'sparkle' | 'electron';
-export type Role = 'dmg' | 'zip' | 'blockmap';
+export type Platform = 'mac' | 'windows';
+export type Role = 'dmg' | 'zip' | 'blockmap' | 'installer';
+
+export const PLATFORMS: readonly Platform[] = ['mac', 'windows'];
+
+export function isPlatform(value: unknown): value is Platform {
+  return value === 'mac' || value === 'windows';
+}
 
 export interface AppIcon {
   /** sha256 of icon.png, hex. Also versions the icon's URL. */
@@ -25,21 +32,52 @@ export interface AppRecord {
 
 export interface ReleaseFile {
   name: string;
+  platform: Platform;
   role: Role;
   size: number;
   sha256: string;
   sha512: string;
+  /** Sparkle apps only, on the file the updater downloads. */
+  edSignature?: string;
+}
+
+export interface PlatformInfo {
+  publishedAt: string;
+  minimumSystemVersion?: string;
 }
 
 export interface Release {
   version: string;
   build: number;
   notes: string;
+  /** When the first platform was published. */
   publishedAt: string;
-  minimumSystemVersion?: string;
   withdrawn: boolean;
-  edSignature?: string;
+  platforms: Partial<Record<Platform, PlatformInfo>>;
   files: ReleaseFile[];
+}
+
+/** release.json as stored. Releases from before Windows support are macOS only and keep a few fields at the top. */
+export interface StoredRelease extends Omit<Release, 'platforms' | 'files'> {
+  platforms?: Release['platforms'];
+  minimumSystemVersion?: string;
+  edSignature?: string;
+  files: (Omit<ReleaseFile, 'platform'> & { platform?: Platform })[];
+}
+
+/** Reads either form of release.json as the current one. */
+export function normalizeRelease(stored: StoredRelease): Release {
+  const { minimumSystemVersion, edSignature, platforms, files, ...rest } = stored;
+  if (platforms) return { ...rest, platforms, files: files.map((file) => ({ ...file, platform: file.platform ?? 'mac' })) };
+  return {
+    ...rest,
+    platforms: { mac: { publishedAt: stored.publishedAt, ...(minimumSystemVersion ? { minimumSystemVersion } : {}) } },
+    files: files.map((file) => ({
+      ...file,
+      platform: 'mac' as const,
+      ...(edSignature && file.role === 'dmg' ? { edSignature } : {}),
+    })),
+  };
 }
 
 export interface TokenRecord {
@@ -187,8 +225,8 @@ export class Store {
     const releases: Release[] = [];
     for (const entry of entries) {
       if (!isVersion(entry)) continue;
-      const release = await readJsonFile<Release>(path.join(dir, entry, 'release.json'));
-      if (release) releases.push(release);
+      const release = await readJsonFile<StoredRelease>(path.join(dir, entry, 'release.json'));
+      if (release) releases.push(normalizeRelease(release));
     }
     releases.sort((a, b) => compareVersions(b.version, a.version));
     this.releaseCache.set(app, releases);

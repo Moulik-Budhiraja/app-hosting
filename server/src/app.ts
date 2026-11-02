@@ -5,7 +5,7 @@ import path from 'node:path';
 import { authenticate, newToken, newTokenId, requireAdmin, requireApp, sha256 } from './auth.ts';
 import type { Principal } from './auth.ts';
 import type { Config } from './config.ts';
-import { electronLatestMac, fileWithRole, liveReleases, releasePath, sparkleAppcast } from './feeds.ts';
+import { FEEDS, PLATFORM_NAMES, detectPlatform, feedName, downloadFile, electronLatest, liveReleases, platformReleases, releasePath, sparkleAppcast } from './feeds.ts';
 import { serveReleaseFile } from './files.ts';
 import { iconVersion, removeIcon, setIcon } from './icons.ts';
 import { HttpError, badRequest, isObject, notFound, readJson, redirect, send, sendError, sendHtml, sendJson, sendNoContent, splitPath } from './http.ts';
@@ -13,6 +13,7 @@ import { appPage, indexPage } from './pages.ts';
 import { isSparklePublicKey } from './sparkle.ts';
 import { Store, isAppName } from './store.ts';
 import type { AppRecord, Release } from './store.ts';
+import { PLATFORMS, isPlatform } from './store.ts';
 import { UPLOAD_TTL_MS, cleanupUploads, commitUpload, receiveFile, startUpload } from './uploads.ts';
 
 export interface AppServer {
@@ -93,7 +94,14 @@ async function publicApp(config: Config, store: Store, req: IncomingMessage, res
   const route = rest.join('/');
 
   if (rest.length === 0) return redirect(res, 301, `/${app.name}/`);
-  if (route === '') return sendHtml(res, 200, appPage(config.remoteName, app, releases));
+  if (route === '') {
+    const requested = query.get('platform');
+    const html = appPage(config.remoteName, app, releases, {
+      requested: isPlatform(requested) ? requested : null,
+      visitor: detectPlatform(req.headers['user-agent']),
+    });
+    return sendHtml(res, 200, html, { vary: 'User-Agent' });
+  }
 
   if (route === 'icon.png') {
     if (!app.icon) throw notFound(`${app.title} has no icon`);
@@ -118,23 +126,36 @@ async function publicApp(config: Config, store: Store, req: IncomingMessage, res
     return send(res, 200, data, headers);
   }
 
+  if (rest[0] === 'download' && rest.length === 2) {
+    const platform = rest[1];
+    if (!isPlatform(platform)) throw notFound();
+    const latest = platformReleases(releases, platform)[0];
+    if (!latest) throw notFound(`${app.title} has no ${PLATFORM_NAMES[platform]} release yet`);
+    return redirect(res, 302, `../${releasePath(latest, downloadFile(latest, platform)!)}`);
+  }
+
   if (route === 'download') {
-    const latest = liveReleases(releases)[0];
-    const dmg = latest && fileWithRole(latest, 'dmg');
-    if (!latest || !dmg) throw notFound(`${app.title} has no releases yet`);
-    return redirect(res, 302, releasePath(latest, dmg));
+    const available = PLATFORMS.filter((platform) => platformReleases(releases, platform).length > 0);
+    if (!available.length) throw notFound(`${app.title} has no releases yet`);
+    const visitor = detectPlatform(req.headers['user-agent']);
+    const headers = { vary: 'User-Agent', 'cache-control': 'no-cache' };
+    // A visitor on a platform the app doesn't ship for sees the page, which says what it does ship for.
+    if (visitor && !available.includes(visitor)) return send(res, 302, '', { location: './', ...headers });
+    const platform = visitor ?? available[0]!;
+    const latest = platformReleases(releases, platform)[0]!;
+    return send(res, 302, '', { location: releasePath(latest, downloadFile(latest, platform)!), ...headers });
   }
 
-  if (route === 'appcast.xml' && app.updater === 'sparkle') {
-    return send(res, 200, sparkleAppcast(app, releases, config.publicUrl), {
-      'content-type': 'application/rss+xml; charset=utf-8',
-      'cache-control': 'no-cache',
-    });
-  }
-
-  if (route === 'latest-mac.yml' && app.updater === 'electron') {
-    const yml = electronLatestMac(releases);
-    if (!yml) throw notFound(`${app.title} has no releases yet`);
+  const feed = Object.hasOwn(FEEDS[app.updater], route) ? FEEDS[app.updater][route] : undefined;
+  if (feed) {
+    if (app.updater === 'sparkle') {
+      return send(res, 200, sparkleAppcast(app, releases, config.publicUrl, feed), {
+        'content-type': 'application/rss+xml; charset=utf-8',
+        'cache-control': 'no-cache',
+      });
+    }
+    const yml = electronLatest(releases, feed);
+    if (!yml) throw notFound(`${app.title} has no ${PLATFORM_NAMES[feed]} releases yet`);
     return send(res, 200, yml, { 'content-type': 'text/yaml; charset=utf-8', 'cache-control': 'no-cache' });
   }
 
@@ -147,9 +168,11 @@ async function publicApp(config: Config, store: Store, req: IncomingMessage, res
         version: release.version,
         build: release.build,
         publishedAt: release.publishedAt,
-        minimumSystemVersion: release.minimumSystemVersion ?? null,
+        // The macOS minimum, for readers from before Windows support.
+        minimumSystemVersion: release.platforms.mac?.minimumSystemVersion ?? null,
         notes: release.notes,
-        files: release.files.map((file) => ({ name: file.name, role: file.role, size: file.size, url: base + releasePath(release, file) })),
+        platforms: release.platforms,
+        files: release.files.map((file) => ({ name: file.name, platform: file.platform, role: file.role, size: file.size, url: base + releasePath(release, file) })),
       })),
       { 'cache-control': 'no-cache' },
     );
@@ -174,7 +197,9 @@ function appView(config: Config, app: AppRecord) {
     urls: {
       page: base,
       download: `${base}download`,
-      feed: base + (app.updater === 'sparkle' ? 'appcast.xml' : 'latest-mac.yml'),
+      // The macOS feed, for readers from before Windows support.
+      feed: base + feedName(app.updater, 'mac'),
+      feeds: Object.fromEntries(PLATFORMS.map((platform) => [platform, base + feedName(app.updater, platform)])),
       updateBase: base,
       ...(app.icon ? { icon: `${base}icon.png?v=${iconVersion(app)}` } : {}),
     },

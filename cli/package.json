@@ -1,7 +1,7 @@
 {
   "name": "@moulikbudhiraja/apps-cli",
   "version": "0.1.0",
-  "description": "Publish auto-updating Mac apps to an apps remote (apps.moulik.dev, apps.proletic.co)",
+  "description": "Publish auto-updating macOS and Windows apps to an apps remote (apps.moulik.dev, apps.proletic.co)",
   "author": "Moulik Budhiraja",
   "homepage": "https://github.com/Moulik-Budhiraja/app-hosting#readme",
   "repository": {

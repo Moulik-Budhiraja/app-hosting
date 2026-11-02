@@ -1,5 +1,5 @@
-import { releasesOf, type ApiClient, type Release } from "../api.js";
-import { checkAppName, readAppFile, type Updater } from "../appfile.js";
+import { hasPlatform, platformPublishedAt, releasePlatforms, releasesOf, type ApiClient, type Release } from "../api.js";
+import { checkAppName, feedName, isPlatform, PLATFORM_NAMES, platformsOf, readAppFile, type Platform, type Updater } from "../appfile.js";
 import { getRemote, loadConfig } from "../config.js";
 import { client, formatBytes, formatDate, requireAdmin, table, type Deps, type Out } from "../context.js";
 import { CliError, EXIT, usage } from "../errors.js";
@@ -38,8 +38,9 @@ function sortNewestFirst(releases: Release[]): Release[] {
   return [...releases].sort((a, b) => b.build - a.build);
 }
 
-function latestLive(releases: Release[]): Release | undefined {
-  return sortNewestFirst(releases).find((release) => !release.withdrawn);
+/** The newest live release with files for the platform. */
+function latestLive(releases: Release[], platform: Platform): Release | undefined {
+  return sortNewestFirst(releases).find((release) => !release.withdrawn && hasPlatform(release, platform));
 }
 
 export async function releasesCommand(deps: Deps, out: Out, options: { dir: string; app?: string; remote?: string }): Promise<void> {
@@ -49,11 +50,14 @@ export async function releasesCommand(deps: Deps, out: Out, options: { dir: stri
   const sorted = sortNewestFirst(releases);
   const human = sorted.length
     ? table([
-      ["VERSION", "BUILD", "PUBLISHED", "DMG", "STATUS"],
-      ...sorted.map((release) => {
-        const dmg = release.files.find((item) => item.role === "dmg");
-        return [release.version, String(release.build), formatDate(release.publishedAt), dmg ? formatBytes(dmg.size) : "", release.withdrawn ? "withdrawn" : "live"];
-      }),
+      ["VERSION", "BUILD", "PUBLISHED", "PLATFORMS", "STATUS"],
+      ...sorted.map((release) => [
+        release.version,
+        String(release.build),
+        formatDate(release.publishedAt),
+        releasePlatforms(release).join(", "),
+        release.withdrawn ? "withdrawn" : "live",
+      ]),
     ])
     : [`${where.app} has no releases on ${where.remote} yet.`];
   out.result(human, { app: where.app, remote: where.remote, releases: sorted });
@@ -156,31 +160,40 @@ export function feedVersion(updater: Updater, text: string): string | null {
   return match ? match[1]! : null;
 }
 
-export async function statusCommand(deps: Deps, out: Out, options: { dir: string; expect?: string }): Promise<number> {
+export async function statusCommand(deps: Deps, out: Out, options: { dir: string; expect?: string; platform?: string }): Promise<number> {
   const file = await readAppFile(options.dir);
   const expected = options.expect ? parseVersion(options.expect).join(".") : undefined;
+  if (options.platform !== undefined && !isPlatform(options.platform)) {
+    throw usage(`--platform must be mac or windows, not "${options.platform}".`);
+  }
+  const platforms: Platform[] = options.platform ? [options.platform as Platform] : platformsOf(file);
   const api = await client(deps, file.remote.name, file.remote.url);
   const { releases, source } = await loadReleases(api, file.app);
-  const latest = latestLive(releases);
-  const feedPath = `/${file.app}/${file.updater === "sparkle" ? "appcast.xml" : "latest-mac.yml"}`;
-  const feedText = await api.publicText(feedPath);
-  const live = feedText === null ? null : feedVersion(file.updater, feedText);
-  const want = expected ?? latest?.version ?? null;
-  const ok = want === null ? live === null : live === want;
 
-  const lines = [
-    `${file.app} on ${file.remote.name} (${file.remote.url}), ${file.updater}`,
-    `  Latest release: ${latest ? `${latest.version} (build ${latest.build}, ${formatDate(latest.publishedAt)})` : "none"}`,
-    `  Live feed:      ${live ?? (feedText === null ? "not found" : "no release")}  ${api.url(feedPath)}`,
-  ];
-  if (expected) lines.push(`  Expected:       ${expected}`);
-  lines.push(ok ? "  ✓ The feed is up to date." : `  ✗ The feed should report ${want ?? "nothing"} but reports ${live ?? "nothing"}.`);
+  const lines = [`${file.app} on ${file.remote.name} (${file.remote.url}), ${file.updater}`];
+  const results = [];
+  for (const platform of platforms) {
+    const latest = latestLive(releases, platform);
+    const feedPath = `/${file.app}/${feedName(file.updater, platform)}`;
+    const feedText = await api.publicText(feedPath);
+    const live = feedText === null ? null : feedVersion(file.updater, feedText);
+    const want = expected ?? latest?.version ?? null;
+    const ok = want === null ? live === null : live === want;
+    lines.push(
+      `  ${PLATFORM_NAMES[platform]}`,
+      `    Latest release: ${latest ? `${latest.version} (build ${latest.build}, ${formatDate(platformPublishedAt(latest, platform))})` : "none"}`,
+      `    Live feed:      ${live ?? (feedText === null ? "not found" : "no release")}  ${api.url(feedPath)}`,
+    );
+    if (expected) lines.push(`    Expected:       ${expected}`);
+    lines.push(ok ? "    ✓ The feed is up to date." : `    ✗ The feed should report ${want ?? "nothing"} but reports ${live ?? "nothing"}.`);
+    results.push({ platform, latest: latest ?? null, feed: { url: api.url(feedPath), version: live }, ok });
+  }
+  const ok = results.every((result) => result.ok);
   out.result(lines, {
     app: file.app,
     remote: file.remote.name,
     updater: file.updater,
-    latest: latest ?? null,
-    feed: { url: api.url(feedPath), version: live },
+    platforms: results,
     expected: expected ?? null,
     ok,
     source,

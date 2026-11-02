@@ -85,7 +85,7 @@ test("sparkle app: create, publish, status, releases, withdraw", async () => {
       remote: { name: "moulik", url: server.url },
       updater: "sparkle",
       tagPrefix: "v",
-      build: { kind: "native", command: "./scripts/build.sh", app: "build/ScreenDraw.app", entitlements: null, dmgName: "ScreenDraw" },
+      builds: { mac: { kind: "native", command: "./scripts/build.sh", app: "build/ScreenDraw.app", entitlements: null, dmgName: "ScreenDraw" } },
     });
 
     // Running create again in the same repo is refused.
@@ -102,11 +102,13 @@ test("sparkle app: create, publish, status, releases, withdraw", async () => {
     assert.equal(release.build, 100000000);
     const stored = server.apps.get("screen-draw")!.releases[0]!;
     assert.equal(stored.notes, "- First release");
-    assert.ok(verifyArchive(await readFile(dmg), stored.edSignature!, createdJson.sparklePublicKey));
+    assert.equal(stored.files[0]!.platform, "mac");
+    assert.ok(verifyArchive(await readFile(dmg), stored.files[0]!.edSignature!, createdJson.sparklePublicKey));
 
     const status = await h.run("status");
     assert.equal(status.code, 0, status.stderr);
-    assert.match(status.stdout, /Latest release: 1\.0\.0 \(build 100000000/);
+    assert.match(status.stdout, /macOS\n    Latest release: 1\.0\.0 \(build 100000000/);
+    assert.doesNotMatch(status.stdout, /Windows/);
     assert.match(status.stdout, /✓ The feed is up to date/);
     assert.equal((await h.run("status", "--expect", "1.0.0")).code, 0);
     assert.equal((await h.run("status", "--expect", "1.0.1")).code, 1);
@@ -114,7 +116,7 @@ test("sparkle app: create, publish, status, releases, withdraw", async () => {
     // Same version again: the server refuses, and the CLI passes its message on.
     const duplicate = await h.run("publish", "--version", "1.0.0", "--dmg", "ScreenDraw-1.0.0.dmg");
     assert.equal(duplicate.code, 1);
-    assert.match(duplicate.stderr, /isn't newer/);
+    assert.match(duplicate.stderr, /already has mac files/);
 
     await writeFile(join(h.dir, "ScreenDraw-1.1.0.dmg"), Buffer.alloc(1000, 9));
     assert.equal((await h.run("publish", "--version", "1.1.0", "--dmg", "ScreenDraw-1.1.0.dmg")).code, 0);
@@ -123,11 +125,12 @@ test("sparkle app: create, publish, status, releases, withdraw", async () => {
 
     assert.equal((await h.run("withdraw", "1.1.0")).code, 0);
     const afterWithdraw = JSON.parse((await h.run("status", "--json")).stdout);
-    assert.equal(afterWithdraw.latest.version, "1.0.0");
-    assert.equal(afterWithdraw.feed.version, "1.0.0");
+    assert.equal(afterWithdraw.platforms[0].platform, "mac");
+    assert.equal(afterWithdraw.platforms[0].latest.version, "1.0.0");
+    assert.equal(afterWithdraw.platforms[0].feed.version, "1.0.0");
     assert.equal(afterWithdraw.ok, true);
     assert.equal((await h.run("restore", "1.1.0")).code, 0);
-    assert.equal(JSON.parse((await h.run("status", "--json")).stdout).feed.version, "1.1.0");
+    assert.equal(JSON.parse((await h.run("status", "--json")).stdout).platforms[0].feed.version, "1.1.0");
 
     // Sparkle apps don't take a zip.
     const zip = await h.run("publish", "--version", "1.2.0", "--dmg", "ScreenDraw-1.1.0.dmg", "--zip", "x.zip");
@@ -179,7 +182,7 @@ test("electron app: create, publish with zip and blockmap", async () => {
     assert.equal(created.code, 0, created.stderr);
     assert.match(created.stdout, /provider: generic, url: .*\/proactive-agent\//);
     const file = JSON.parse(await readFile(join(h.dir, "apps.json"), "utf8"));
-    assert.equal(file.build.zip, "dist/Proactive-Agent-{version}-mac.zip");
+    assert.equal(file.builds.mac.zip, "dist/Proactive-Agent-{version}-mac.zip");
 
     await writeFile(join(h.dir, "Proactive-Agent.dmg"), Buffer.alloc(2000, 1));
     await writeFile(join(h.dir, "Proactive-Agent-0.5.0-mac.zip"), Buffer.alloc(3000, 2));
@@ -197,7 +200,7 @@ test("electron app: create, publish with zip and blockmap", async () => {
     assert.equal(release.edSignature, undefined);
     assert.match(JSON.parse(published.stdout).feed, /\/proactive-agent\/latest-mac\.yml$/);
     const status = await h.run("status", "--json");
-    assert.equal(JSON.parse(status.stdout).feed.version, "0.5.0");
+    assert.equal(JSON.parse(status.stdout).platforms[0].feed.version, "0.5.0");
   } finally {
     await h.cleanup();
   }
@@ -291,6 +294,116 @@ test("build-number, help and unknown commands", async () => {
     assert.equal(badFlag.code, 2);
     const jsonError = await h.run("build-number", "x", "--json");
     assert.equal(JSON.parse(jsonError.stderr).error.code, "USAGE");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("sparkle app on macOS and Windows: one release, each platform published on its own", async () => {
+  const h = await loggedIn();
+  try {
+    const created = await h.run("create", "dual-draw", "--remote", "moulik", "--updater", "sparkle", "--title", "Dual Draw", "--platforms", "windows,mac", "--json");
+    assert.equal(created.code, 0, created.stderr);
+    const createdJson = JSON.parse(created.stdout);
+    assert.match(createdJson.feeds.windows, /\/dual-draw\/appcast-windows\.xml$/);
+    const appsJson = JSON.parse(await readFile(join(h.dir, "apps.json"), "utf8"));
+    assert.deepEqual(Object.keys(appsJson.builds), ["mac", "windows"]);
+    assert.deepEqual(appsJson.builds.windows, { kind: "native", command: "./scripts/build.ps1", installer: "build/DualDraw-Setup-{version}.exe" });
+    const human = await h.run("create", "other-app", "--remote", "moulik", "--updater", "sparkle", "--platforms", "linux", "-C", h.home);
+    assert.equal(human.code, 2);
+    assert.match(human.stderr, /"linux" isn't a platform/);
+
+    await writeFile(join(h.dir, "DualDraw-1.0.0.dmg"), Buffer.alloc(4000, 1));
+    await writeFile(join(h.dir, "DualDraw-Setup-1.0.0.exe"), Buffer.alloc(5000, 2));
+    await writeFile(join(h.dir, "notes.md"), "- Now on Windows");
+
+    // Windows first; --installer picks the platform.
+    const windows = await h.run("publish", "--version", "1.0.0", "--installer", "DualDraw-Setup-1.0.0.exe", "--minimum-system-version", "10.0.17763", "--notes-file", "notes.md", "--json");
+    assert.equal(windows.code, 0, windows.stderr);
+    const windowsJson = JSON.parse(windows.stdout);
+    assert.equal(windowsJson.platform, "windows");
+    assert.match(windowsJson.feed, /appcast-windows\.xml$/);
+    const stored = server.apps.get("dual-draw")!.releases[0]!;
+    assert.deepEqual(stored.files.map((file) => [file.platform, file.role]), [["windows", "installer"]]);
+    assert.equal(stored.platforms.windows!.minimumSystemVersion, "10.0.17763");
+    assert.ok(verifyArchive(await readFile(join(h.dir, "DualDraw-Setup-1.0.0.exe")), stored.files[0]!.edSignature!, createdJson.sparklePublicKey));
+
+    // The status of a platform that has nothing yet is a mismatch, not an error.
+    const half = JSON.parse((await h.run("status", "--json")).stdout);
+    assert.deepEqual(half.platforms.map((item: { platform: string; ok: boolean }) => [item.platform, item.ok]), [["mac", true], ["windows", true]]);
+    assert.equal(half.platforms[0].latest, null);
+    assert.equal((await h.run("status", "--expect", "1.0.0")).code, 1);
+    assert.equal((await h.run("status", "--expect", "1.0.0", "--platform", "windows")).code, 0);
+
+    // macOS joins the same release.
+    const mac = await h.run("publish", "--version", "1.0.0", "--dmg", "DualDraw-1.0.0.dmg", "--json");
+    assert.equal(mac.code, 0, mac.stderr);
+    assert.equal(JSON.parse(mac.stdout).platform, "mac");
+    assert.equal(server.apps.get("dual-draw")!.releases.length, 1);
+    assert.deepEqual(stored.files.map((file) => file.platform), ["windows", "mac"]);
+    assert.equal(stored.notes, "- Now on Windows");
+
+    const status = await h.run("status", "--expect", "1.0.0");
+    assert.equal(status.code, 0, status.stderr);
+    assert.match(status.stdout, /macOS\n    Latest release: 1\.0\.0/);
+    assert.match(status.stdout, /Windows\n    Latest release: 1\.0\.0[^\n]*\n    Live feed:      1\.0\.0  .*appcast-windows\.xml/);
+    const releases = await h.run("releases");
+    assert.match(releases.stdout, /PLATFORMS/);
+    assert.match(releases.stdout, /1\.0\.0 .*mac, windows\s+live/);
+
+    // Flags that don't fit the platform or updater.
+    const cases: [string[], RegExp][] = [
+      [["--installer", "DualDraw-Setup-1.0.0.exe", "--dmg", "DualDraw-1.0.0.dmg"], /--dmg and --zip are for macOS/],
+      [["--platform", "mac", "--installer", "DualDraw-Setup-1.0.0.exe"], /--installer is for Windows/],
+      [["--platform", "windows"], /Pass --installer/],
+      [["--installer", "DualDraw-1.0.0.dmg"], /must end in \.exe or \.msi/],
+      [["--installer", "DualDraw-Setup-1.0.0.exe", "--blockmap", "x.blockmap"], /--blockmap is for electron apps/],
+      [["--installer", "DualDraw-Setup-1.0.0.exe", "--minimum-system-version", "Windows 10"], /10\.0 or 10\.0\.17763 on Windows/],
+      [["--platform", "linux", "--dmg", "x.dmg"], /--platform must be mac or windows/],
+    ];
+    for (const [args, message] of cases) {
+      const result = await h.run("publish", "--version", "1.1.0", ...args);
+      assert.equal(result.code, 2, args.join(" "));
+      assert.match(result.stderr, message);
+    }
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("electron app on Windows: installer and its blockmap", async () => {
+  const h = await loggedIn();
+  try {
+    const created = await h.run("create", "win-agent", "--remote", "moulik", "--updater", "electron", "--title", "Win Agent", "--platforms", "windows");
+    assert.equal(created.code, 0, created.stderr);
+    assert.match(created.stdout, /azureSignOptions/);
+    assert.doesNotMatch(created.stdout, /SUFeedURL/);
+    const file = JSON.parse(await readFile(join(h.dir, "apps.json"), "utf8"));
+    assert.deepEqual(Object.keys(file.builds), ["windows"]);
+    assert.equal(file.builds.windows.blockmap, "dist/Win-Agent-Setup-{version}.exe.blockmap");
+
+    await writeFile(join(h.dir, "Win-Agent-Setup-0.2.0.exe"), Buffer.alloc(3000, 2));
+    await writeFile(join(h.dir, "Win-Agent-Setup-0.2.0.exe.blockmap"), Buffer.alloc(40, 3));
+    await writeFile(join(h.dir, "Win-Agent-Setup-0.2.0.msi"), Buffer.alloc(30, 3));
+    const msi = await h.run("publish", "--version", "0.2.0", "--installer", "Win-Agent-Setup-0.2.0.msi");
+    assert.equal(msi.code, 2);
+    assert.match(msi.stderr, /NSIS installer ending in \.exe/);
+    const badBlockmap = await h.run("publish", "--version", "0.2.0", "--installer", "Win-Agent-Setup-0.2.0.exe", "--blockmap", "Win-Agent-Setup-0.2.0.msi");
+    assert.equal(badBlockmap.code, 2);
+    assert.match(badBlockmap.stderr, /must be named Win-Agent-Setup-0\.2\.0\.exe\.blockmap/);
+
+    const published = await h.run("publish", "--version", "0.2.0", "--installer", "Win-Agent-Setup-0.2.0.exe", "--blockmap", "Win-Agent-Setup-0.2.0.exe.blockmap", "--json");
+    assert.equal(published.code, 0, published.stderr);
+    const json = JSON.parse(published.stdout);
+    assert.match(json.feed, /\/win-agent\/latest\.yml$/);
+    assert.deepEqual(json.release.files.map((item: { platform: string; role: string }) => [item.platform, item.role]), [["windows", "installer"], ["windows", "blockmap"]]);
+    assert.equal(json.release.files[0].edSignature, undefined);
+
+    const status = JSON.parse((await h.run("status", "--json")).stdout);
+    assert.deepEqual(status.platforms.map((item: { platform: string }) => item.platform), ["windows"]);
+    assert.equal(status.platforms[0].feed.version, "0.2.0");
+    assert.match(status.platforms[0].feed.url, /latest\.yml$/);
+    assert.equal(status.ok, true);
   } finally {
     await h.cleanup();
   }

@@ -1,15 +1,16 @@
-# Builds, signs, notarizes and publishes a Mac app when its repo pushes a
-# release tag. Apps call it from .github/workflows/release.yml:
+# Builds, signs, notarizes and publishes the macOS build of an app when its
+# repo pushes a release tag. Apps call it from .github/workflows/release.yml,
+# next to release-windows.yml when they ship for Windows too:
 #
 #   on:
 #     push:
 #       tags: ['v*']
 #   jobs:
-#     release:
+#     mac:
 #       uses: Moulik-Budhiraja/app-hosting/.github/workflows/release-mac.yml@main
 #       secrets: inherit
 #
-# Everything app-specific comes from the repo's apps.json (see DESIGN.md).
+# Everything app-specific comes from the repo's apps.json (builds.mac, see DESIGN.md).
 # Secrets live in the repo's "production" environment; `apps init` sets them.
 name: Release Mac app
 
@@ -84,7 +85,7 @@ jobs:
       - name: Read apps.json
         id: config
         run: |
-          "$TOOLING/scripts/mac/read-config.sh" apps.json | tee -a "$GITHUB_OUTPUT"
+          "$TOOLING/scripts/common/read-config.sh" apps.json mac | tee -a "$GITHUB_OUTPUT"
 
       - name: Check the tag
         id: tag
@@ -94,7 +95,7 @@ jobs:
           PREFIX: ${{ steps.config.outputs.tag_prefix }}
         run: |
           [[ $REF_TYPE == tag ]] || { echo "Releases run from tags like ${PREFIX}1.2.3 pushed on main" >&2; exit 1; }
-          "$TOOLING/scripts/mac/check-tag.sh" "$TAG" "$PREFIX" | tee -a "$GITHUB_OUTPUT"
+          "$TOOLING/scripts/common/check-tag.sh" "$TAG" "$PREFIX" | tee -a "$GITHUB_OUTPUT"
 
       - name: Skip if already published
         id: existing
@@ -104,21 +105,12 @@ jobs:
           VERSION: ${{ steps.tag.outputs.version }}
         run: |
           # A local release (release-local.sh) or an earlier attempt may have
-          # published this version already; the server would refuse it again.
-          # shellcheck disable=SC2016 # the JavaScript below is meant literally
-          published=$(node -e '
-            const [url, version] = process.argv.slice(1);
-            fetch(url).then(async (r) => {
-              if (r.status === 404) { console.error(`${url} not found: create the app with \`apps create\` first`); process.exit(1); }
-              if (!r.ok) { console.error(`${url} answered ${r.status}`); process.exit(1); }
-              const body = await r.json();
-              const list = Array.isArray(body) ? body : body.releases ?? [];
-              console.log(list.some((x) => x.version === version) ? "true" : "false");
-            }).catch((e) => { console.error(e.message); process.exit(1); });
-          ' "$REMOTE_URL/$APP/releases.json" "$VERSION")
+          # published this version for macOS already; the server would refuse
+          # it again. Windows files in the same release don't count.
+          published=$("$TOOLING/scripts/common/published.sh" "$REMOTE_URL" "$APP" "$VERSION" mac)
           echo "published=$published" >> "$GITHUB_OUTPUT"
           if [[ $published == true ]]; then
-            echo "::notice::$APP $VERSION is already published on $REMOTE_URL; nothing to do."
+            echo "::notice::$APP $VERSION is already published for macOS on $REMOTE_URL; nothing to do."
           fi
 
       - name: Build the apps CLI
@@ -180,7 +172,7 @@ jobs:
           NOTES_FILE: ${{ steps.notes.outputs.file }}
         run: |
           [[ -n $APPS_TOKEN ]] || { echo "APPS_TOKEN isn't set on the production environment; run \`apps init\`" >&2; exit 1; }
-          args=(publish --version "$VERSION" --build "$BUILD" --dmg "$DMG")
+          args=(publish --platform mac --version "$VERSION" --build "$BUILD" --dmg "$DMG")
           [[ -n $ZIP ]] && args+=(--zip "$ZIP")
           [[ -n $BLOCKMAP ]] && args+=(--blockmap "$BLOCKMAP")
           [[ -n $MINIMUM_SYSTEM_VERSION ]] && args+=(--minimum-system-version "$MINIMUM_SYSTEM_VERSION")
@@ -201,7 +193,7 @@ jobs:
             pattern="<sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>"
           else
             feed="$REMOTE_URL/$APP/latest-mac.yml"
-            pattern="version: $VERSION"
+            pattern="version: \"$VERSION\""
           fi
           for _ in $(seq 1 10); do
             if curl --fail --silent --show-error --max-time 15 "$feed" | grep -qF "$pattern"; then

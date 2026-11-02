@@ -22,7 +22,7 @@ function ghResponder(policies: { name: string; type: string }[] = []) {
   };
 }
 
-async function setup(gh = ghResponder()) {
+async function setup(gh = ghResponder(), platforms = "mac") {
   const h = await harness({ stdin: `${server.adminToken}\n`, gh });
   const signing = join(h.home, "signing");
   await mkdir(signing);
@@ -32,7 +32,7 @@ async function setup(gh = ghResponder()) {
   await h.run("remote", "add", "moulik", server.url);
   assert.equal((await h.run("login", "moulik", "--token-stdin")).code, 0);
   const name = `init-${Math.random().toString(36).slice(2, 8)}`;
-  const created = await h.run("create", name, "--remote", "moulik", "--updater", "sparkle", "--title", "ScreenDraw");
+  const created = await h.run("create", name, "--remote", "moulik", "--updater", "sparkle", "--title", "ScreenDraw", "--platforms", platforms);
   assert.equal(created.code, 0, created.stderr);
   return { h, signing, name };
 }
@@ -181,6 +181,101 @@ test("init refuses without signing files or with several API keys", async () => 
     assert.equal(several.code, 2);
     assert.match(several.stderr, /Pass --key-id/);
     assert.equal((await h.run("init", "--dry-run", "--signing-dir", signing, "--key-id", "SECOND")).code, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+const azureSigning = {
+  tenantId: "tenant-1",
+  clientId: "client-1",
+  clientSecret: "client-secret-1",
+  endpoint: "https://eus.codesigning.azure.net",
+  account: "moulik-signing",
+  profile: "public-trust",
+  publisher: "Moulik Budhiraja",
+};
+
+function secretsSet(calls: { args: string[]; options?: { input?: string } }[]): Record<string, string | undefined> {
+  return Object.fromEntries(calls.filter((call) => call.args[0] === "secret").map((call) => [call.args[2], call.options?.input]));
+}
+
+test("init for macOS and Windows sets both platforms' secrets and a job for each", async () => {
+  const { h, signing, name } = await setup(ghResponder(), "mac,windows");
+  try {
+    await writeFile(join(signing, "azure-signing.json"), JSON.stringify(azureSigning));
+    const dry = await h.run("init", "--dry-run", "--signing-dir", signing);
+    assert.equal(dry.code, 0, dry.stderr);
+    assert.match(dry.stdout, /APPLE_ISSUER_ID, AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE, AZURE_SIGNING_PUBLISHER, APPS_TOKEN, SPARKLE_PRIVATE_KEY/);
+    assert.match(dry.stdout, /Artifact Signing settings from .*azure-signing\.json/);
+    assert.match(dry.stdout, /win_sparkle_set_appcast_url\(".*\/appcast-windows\.xml"\)/);
+    assert.match(dry.stdout, /SUFeedURL/);
+    assert.doesNotMatch(dry.stdout, /client-secret-1/);
+
+    const result = await h.run("init", "--signing-dir", signing, "--apple-issuer-id", "issuer-x", "--json");
+    assert.equal(result.code, 0, result.stderr);
+    const json = JSON.parse(result.stdout);
+    assert.deepEqual(json.platforms, ["mac", "windows"]);
+    assert.match(json.feeds.windows, /appcast-windows\.xml$/);
+    const secrets = secretsSet(h.gh.calls);
+    assert.equal(secrets.APPLE_ISSUER_ID, "issuer-x");
+    assert.equal(secrets.AZURE_TENANT_ID, "tenant-1");
+    assert.equal(secrets.AZURE_CLIENT_SECRET, "client-secret-1");
+    assert.equal(secrets.AZURE_SIGNING_PUBLISHER, "Moulik Budhiraja");
+    assert.equal(secrets.APPS_TOKEN, server.tokens.find((item) => item.app === name)!.token);
+    for (const call of h.gh.calls) assert.ok(!call.args.includes("client-secret-1"), "secret leaked into argv");
+    assert.equal(await readFile(join(h.dir, ".github/workflows/release.yml"), "utf8"), workflowTemplate("v", ["mac", "windows"]));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("init for a Windows-only app needs no Apple files or issuer", async () => {
+  const responder = ghResponder();
+  const { h, name } = await setup((args) => (args[0] === "api" && args[1] === "repos/me/win" ? '{"private":false}' : responder(args)), "windows");
+  try {
+    const signing = join(h.home, "windows-signing");
+    await mkdir(signing);
+    await writeFile(join(signing, "azure-signing.json"), JSON.stringify(azureSigning));
+    const result = await h.run("init", "--signing-dir", signing, "--repo", "me/win");
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(Object.keys(secretsSet(h.gh.calls)), [
+      "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SIGNING_ENDPOINT",
+      "AZURE_SIGNING_ACCOUNT", "AZURE_SIGNING_PROFILE", "AZURE_SIGNING_PUBLISHER", "APPS_TOKEN", "SPARKLE_PRIVATE_KEY",
+    ]);
+    assert.equal(h.answers.length, 0);
+    assert.equal((await loadConfig(h.deps.env)).appleIssuerId, undefined);
+    // A public repo needs fork approval and the Windows runner allowlist, not the macOS one.
+    assert.ok(h.gh.calls.some((call) => call.args.includes("repos/me/win/actions/permissions/fork-pr-contributor-approval")));
+    assert.doesNotMatch(result.stdout, /publicRepositories/);
+    assert.match(result.stdout, /Windows runner controller.s public-repo allowlist/);
+    const workflow = await readFile(join(h.dir, ".github/workflows/release.yml"), "utf8");
+    assert.equal(workflow, workflowTemplate("v", ["windows"]));
+    assert.doesNotMatch(workflow, /release-mac/);
+    assert.ok(server.tokens.some((item) => item.app === name));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("init refuses a Windows build without complete Artifact Signing settings", async () => {
+  const { h, signing } = await setup(ghResponder(), "mac,windows");
+  try {
+    const missing = await h.run("init", "--dry-run", "--signing-dir", signing, "--json");
+    assert.equal(missing.code, 2);
+    assert.equal(JSON.parse(missing.stderr).error.code, "MISSING_SIGNING_FILES");
+    assert.match(JSON.parse(missing.stderr).error.message, /azure-signing\.json.*"tenantId", "clientId"/);
+
+    const { clientSecret: _secret, publisher: _publisher, ...partial } = azureSigning;
+    await writeFile(join(signing, "azure-signing.json"), JSON.stringify(partial));
+    const incomplete = await h.run("init", "--dry-run", "--signing-dir", signing);
+    assert.equal(incomplete.code, 2);
+    assert.match(incomplete.stderr, /azure-signing\.json is missing clientSecret, publisher/);
+
+    await writeFile(join(signing, "azure-signing.json"), "[1]");
+    const notObject = await h.run("init", "--dry-run", "--signing-dir", signing);
+    assert.equal(notObject.code, 2);
+    assert.match(notObject.stderr, /isn't a JSON object/);
   } finally {
     await h.cleanup();
   }

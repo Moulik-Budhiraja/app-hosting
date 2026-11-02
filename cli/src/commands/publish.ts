@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
-import { ApiError, type UploadStart } from "../api.js";
-import { readAppFile } from "../appfile.js";
+import { ApiError, type Role, type UploadStart } from "../api.js";
+import { isPlatform, MINIMUM_SYSTEM, PLATFORM_NAMES, readAppFile, type Platform } from "../appfile.js";
 import { client, formatBytes, type Deps, type Out } from "../context.js";
 import { CliError, EXIT, usage } from "../errors.js";
 import { readIcon } from "../icon.js";
@@ -16,11 +16,13 @@ const SAFE_NAME = /^[A-Za-z0-9._-]+$/;
 export interface PublishOptions {
   dir: string;
   version?: string;
+  platform?: string;
   build?: string;
   notesFile?: string;
   dmg?: string;
   zip?: string;
   blockmap?: string;
+  installer?: string;
   minimumSystemVersion?: string;
   icon?: string;
 }
@@ -28,7 +30,7 @@ export interface PublishOptions {
 interface LocalFile {
   path: string;
   name: string;
-  role: "dmg" | "zip" | "blockmap";
+  role: Role;
   size: number;
   sha256: string;
 }
@@ -57,46 +59,79 @@ class Progress {
   }
 }
 
+/** Which platform a publish is for: --platform, else Windows when there's an --installer. */
+export function publishPlatform(options: Pick<PublishOptions, "platform" | "installer">): Platform {
+  if (options.platform === undefined) return options.installer ? "windows" : "mac";
+  if (!isPlatform(options.platform)) throw usage(`--platform must be mac or windows, not "${options.platform}".`);
+  return options.platform;
+}
+
 export async function publishCommand(deps: Deps, out: Out, options: PublishOptions): Promise<void> {
   const file = await readAppFile(options.dir);
   if (!options.version) throw usage("Pass --version X.Y.Z.");
   const version = parseVersion(options.version).join(".");
   const build = options.build ? parseBuild(options.build) : defaultBuild(version);
-  if (!options.dmg) throw usage("Pass --dmg <path>. Every release needs a DMG.");
-  if (file.updater === "sparkle" && (options.zip || options.blockmap)) {
-    throw usage("Sparkle apps update from the DMG; --zip and --blockmap are for electron apps.");
+  const platform = publishPlatform(options);
+  const inputs: { path: string; role: Role }[] = [];
+
+  if (platform === "mac") {
+    if (options.installer) throw usage("--installer is for Windows. Pass --platform windows, or --dmg for macOS.");
+    if (!options.dmg) throw usage("Pass --dmg <path>. Every macOS release needs a DMG.");
+    if (file.updater === "sparkle" && (options.zip || options.blockmap)) {
+      throw usage("Sparkle apps update from the DMG; --zip and --blockmap are for electron apps.");
+    }
+    if (file.updater === "electron" && !options.zip) throw usage("Electron apps need --zip <path> (the update archive).");
+    if (options.blockmap && !options.zip) throw usage("--blockmap goes with --zip.");
+    inputs.push({ path: options.dmg, role: "dmg" });
+    if (options.zip) inputs.push({ path: options.zip, role: "zip" });
+  } else {
+    if (options.dmg || options.zip) throw usage("--dmg and --zip are for macOS. Windows releases take --installer <path>.");
+    if (!options.installer) throw usage("Pass --installer <path>. Every Windows release needs an installer.");
+    const installerName = basename(options.installer);
+    if (file.updater === "electron" ? !installerName.endsWith(".exe") : !/\.(exe|msi)$/.test(installerName)) {
+      throw usage(file.updater === "electron"
+        ? `${installerName}: electron apps ship an NSIS installer ending in .exe.`
+        : `${installerName}: the installer must end in .exe or .msi.`);
+    }
+    if (file.updater === "sparkle" && options.blockmap) {
+      throw usage("Sparkle apps update from the installer; --blockmap is for electron apps.");
+    }
+    inputs.push({ path: options.installer, role: "installer" });
   }
-  if (file.updater === "electron" && !options.zip) throw usage("Electron apps need --zip <path> (the update archive).");
-  if (options.blockmap && !options.zip) throw usage("--blockmap goes with --zip.");
+  if (options.blockmap) inputs.push({ path: options.blockmap, role: "blockmap" });
+  if (options.minimumSystemVersion && !MINIMUM_SYSTEM[platform].test(options.minimumSystemVersion)) {
+    throw usage(`--minimum-system-version should look like ${platform === "mac" ? "13.0" : "10.0 or 10.0.17763"} on ${PLATFORM_NAMES[platform]}.`);
+  }
 
   const notes = options.notesFile ? await readFile(resolve(options.dir, options.notesFile), "utf8") : undefined;
   const icon = options.icon ? await readIcon(options.dir, options.icon) : undefined;
 
-  const inputs: { path: string; role: LocalFile["role"] }[] = [{ path: options.dmg, role: "dmg" }];
-  if (options.zip) inputs.push({ path: options.zip, role: "zip" });
-  if (options.blockmap) inputs.push({ path: options.blockmap, role: "blockmap" });
-
-  const files: LocalFile[] = [];
-  for (const input of inputs) {
+  const named = inputs.map((input) => {
     const path = resolve(options.dir, input.path);
     const name = basename(path);
     if (!SAFE_NAME.test(name) || name.startsWith(".")) {
       throw usage(`${name}: file names may only use letters, digits, dots, dashes and underscores, and can't start with a dot.`);
     }
-    out.info(`Hashing ${name}…`);
-    files.push({ path, name, role: input.role, ...(await digestFile(path)) });
+    return { ...input, path, name };
+  });
+  // The blockmap follows the file it maps: the zip on macOS, the installer on Windows.
+  const update = named.find((item) => item.role === (platform === "mac" ? "zip" : "installer"));
+  const blockmap = named.find((item) => item.role === "blockmap");
+  if (blockmap && update && blockmap.name !== `${update.name}.blockmap`) {
+    throw usage(`The blockmap must be named ${update.name}.blockmap (got ${blockmap.name}).`);
   }
-  const zip = files.find((item) => item.role === "zip");
-  const blockmap = files.find((item) => item.role === "blockmap");
-  if (blockmap && zip && blockmap.name !== `${zip.name}.blockmap`) {
-    throw usage(`The blockmap must be named ${zip.name}.blockmap (got ${blockmap.name}).`);
+  if (new Set(named.map((item) => item.name)).size !== named.length) throw usage("Each file needs a different name.");
+
+  const files: LocalFile[] = [];
+  for (const item of named) {
+    out.info(`Hashing ${item.name}…`);
+    files.push({ path: item.path, name: item.name, role: item.role, ...(await digestFile(item.path)) });
   }
-  if (new Set(files.map((item) => item.name)).size !== files.length) throw usage("Each file needs a different name.");
 
   const api = await client(deps, file.remote.name, file.remote.url);
   if (!api.token) {
     throw new CliError(
-      `No token for ${file.remote.name}. In CI set APPS_TOKEN; on this Mac run: apps login ${file.remote.name}`,
+      `No token for ${file.remote.name}. In CI set APPS_TOKEN; on this machine run: apps login ${file.remote.name}`,
       EXIT.auth,
       "NOT_LOGGED_IN",
     );
@@ -121,12 +156,14 @@ export async function publishCommand(deps: Deps, out: Out, options: PublishOptio
         "SPARKLE_KEY_MISMATCH",
       );
     }
-    // Ed25519 signs the whole archive, so the DMG is read into memory once here.
+    // Ed25519 signs the whole file the updater downloads (the DMG or the
+    // installer), so it is read into memory once here.
     edSignature = signArchive(await readFile(files[0]!.path), key);
   }
 
   const start: UploadStart = {
     version,
+    platform,
     build,
     ...(notes !== undefined ? { notes } : {}),
     ...(options.minimumSystemVersion ? { minimumSystemVersion: options.minimumSystemVersion } : {}),
@@ -168,13 +205,13 @@ export async function publishCommand(deps: Deps, out: Out, options: PublishOptio
     }
   }
 
-  const feed = feedUrl(file);
+  const feed = feedUrl(file, platform);
   out.result(
     [
-      `Published ${file.app} ${release.version} (build ${release.build}) to ${file.remote.name}.`,
+      `Published ${file.app} ${release.version} (build ${release.build}) for ${PLATFORM_NAMES[platform]} to ${file.remote.name}.`,
       `  Feed:     ${feed}`,
       `  Download: ${file.remote.url}/${file.app}/`,
     ],
-    { app: file.app, remote: file.remote.name, feed, release, iconUpdated },
+    { app: file.app, remote: file.remote.name, platform, feed, release, iconUpdated },
   );
 }

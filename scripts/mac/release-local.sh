@@ -43,9 +43,9 @@ if [[ $dry_run != 1 ]] && ! command -v apps >/dev/null; then
   apps_cli=(node "$here/../../cli/dist/index.js")
 fi
 
-settings=$("$here/read-config.sh" apps.json)
+settings=$("$here/../common/read-config.sh" apps.json mac)
 tag_prefix=$(grep -m1 '^tag_prefix=' <<<"$settings" | cut -d= -f2-)
-eval "$(SKIP_MAIN_CHECK=1 "$here/check-tag.sh" "$tag_prefix$version" "$tag_prefix" | sed 's/^/release_/')"
+eval "$(SKIP_MAIN_CHECK=1 "$here/../common/check-tag.sh" "$tag_prefix$version" "$tag_prefix" | sed 's/^/release_/')"
 # shellcheck disable=SC2154 # set by the eval above
 export VERSION=$release_version BUILD=$release_build
 

@@ -2,7 +2,7 @@
   "name": "apps-server",
   "version": "0.1.0",
   "private": true,
-  "description": "Update host for auto-updating Mac apps (Sparkle and electron-updater feeds, downloads, uploads)",
+  "description": "Update host for auto-updating macOS and Windows apps (Sparkle, WinSparkle and electron-updater feeds, downloads, uploads)",
   "type": "module",
   "engines": {
     "node": ">=24"

@@ -4,16 +4,20 @@ import type { IncomingMessage } from 'node:http';
 import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { PLATFORM_NAMES, hasPlatform } from './feeds.ts';
 import { HttpError, badRequest, isObject } from './http.ts';
 import { isSparkleSignature, verifySparkleSignature } from './sparkle.ts';
-import type { AppRecord, Release, ReleaseFile, Role, Store } from './store.ts';
-import { writeJsonAtomic } from './store.ts';
+import type { AppRecord, Platform, Release, ReleaseFile, Role, Store, Updater } from './store.ts';
+import { isPlatform, writeJsonAtomic } from './store.ts';
 import { compareVersions, defaultBuild, isVersion } from './versions.ts';
 
 export const UPLOAD_TTL_MS = 6 * 60 * 60 * 1000;
 export const MAX_FILE_SIZE = 4 * 1024 ** 3;
 const FILE_NAME_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$/;
-const MIN_SYSTEM_RE = /^\d{1,2}(\.\d{1,2}){0,2}$/;
+const MIN_SYSTEM_RE: Record<Platform, RegExp> = {
+  mac: /^\d{1,2}(\.\d{1,2}){0,2}$/,
+  windows: /^\d{1,2}(\.\d{1,5}){0,2}$/,
+};
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const MAX_NOTES = 100_000;
 
@@ -27,6 +31,8 @@ interface DeclaredFile {
 interface UploadState {
   id: string;
   app: string;
+  /** Missing in uploads started before Windows support, which were all macOS. */
+  platform?: Platform;
   version: string;
   build: number;
   notes: string;
@@ -37,6 +43,20 @@ interface UploadState {
   expiresAt: string;
   committed: boolean;
 }
+
+/** The roles a platform's files take, with how many of each: [min, max]. */
+const FILE_RULES: Record<Updater, Record<Platform, Partial<Record<Role, [number, number]>>>> = {
+  sparkle: { mac: { dmg: [1, 1] }, windows: { installer: [1, 1] } },
+  electron: { mac: { dmg: [1, 1], zip: [1, 1], blockmap: [0, 1] }, windows: { installer: [1, 1], blockmap: [0, 1] } },
+};
+
+const FILES_HINT: Record<Updater, Record<Platform, string>> = {
+  sparkle: { mac: 'Sparkle apps upload only the DMG for macOS', windows: 'Sparkle apps upload only the installer (.exe or .msi) for Windows' },
+  electron: {
+    mac: 'Electron apps upload the DMG and the zip, and optionally its blockmap, for macOS',
+    windows: 'Electron apps upload the installer (.exe), and optionally its blockmap, for Windows',
+  },
+};
 
 const inProgress = new Set<string>();
 
@@ -52,16 +72,16 @@ function isFileName(name: unknown): name is string {
   return typeof name === 'string' && FILE_NAME_RE.test(name) && name !== 'release.json';
 }
 
-function parseFiles(app: AppRecord, value: unknown): DeclaredFile[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 3) {
-    throw badRequest('invalid_files', 'files must list the DMG, plus the zip (and blockmap) for electron apps');
-  }
+function parseFiles(app: AppRecord, platform: Platform, value: unknown): DeclaredFile[] {
+  const rules = FILE_RULES[app.updater][platform];
+  const hint = FILES_HINT[app.updater][platform];
+  if (!Array.isArray(value) || value.length === 0 || value.length > 3) throw badRequest('invalid_files', hint);
   const files = value.map((entry): DeclaredFile => {
     if (!isObject(entry)) throw badRequest('invalid_files', 'Each file needs name, role, size and sha256');
     const { name, role, size } = entry;
     const sha256 = typeof entry.sha256 === 'string' ? entry.sha256.toLowerCase() : '';
     if (!isFileName(name)) throw badRequest('invalid_file_name', 'File names may only use letters, digits, ".", "_" and "-"');
-    if (role !== 'dmg' && role !== 'zip' && role !== 'blockmap') throw badRequest('invalid_role', `Unknown role for ${name}`);
+    if (role !== 'dmg' && role !== 'zip' && role !== 'blockmap' && role !== 'installer') throw badRequest('invalid_role', `Unknown role for ${name}`);
     if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 1 || size > MAX_FILE_SIZE) {
       throw badRequest('invalid_size', `${name} must be between 1 byte and 4 GiB`);
     }
@@ -72,60 +92,100 @@ function parseFiles(app: AppRecord, value: unknown): DeclaredFile[] {
   if (new Set(files.map((file) => file.name)).size !== files.length) {
     throw badRequest('invalid_files', 'File names must be unique');
   }
-  const count = (role: Role) => files.filter((file) => file.role === role).length;
-  if (count('dmg') !== 1) throw badRequest('invalid_files', 'Exactly one file must have role dmg');
-  if (app.updater === 'sparkle') {
-    if (files.length !== 1) throw badRequest('invalid_files', 'Sparkle apps upload only the DMG');
-  } else {
-    if (count('zip') !== 1) throw badRequest('invalid_files', 'Electron apps need exactly one zip');
-    const blockmap = files.find((file) => file.role === 'blockmap');
-    const zip = files.find((file) => file.role === 'zip')!;
-    if (blockmap && blockmap.name !== `${zip.name}.blockmap`) {
-      throw badRequest('invalid_files', `The blockmap must be named ${zip.name}.blockmap`);
+  for (const file of files) {
+    if (!rules[file.role]) throw badRequest('invalid_files', `${hint}; ${file.name} can't have role ${file.role}`);
+  }
+  for (const [role, [min, max]] of Object.entries(rules) as [Role, [number, number]][]) {
+    const count = files.filter((file) => file.role === role).length;
+    if (count < min || count > max) throw badRequest('invalid_files', hint);
+  }
+  const installer = files.find((file) => file.role === 'installer');
+  if (installer) {
+    const extensions = app.updater === 'electron' ? ['.exe'] : ['.exe', '.msi'];
+    if (!extensions.some((ext) => installer.name.toLowerCase().endsWith(ext))) {
+      throw badRequest('invalid_files', `The installer must be ${extensions.join(' or ')}`);
+    }
+  }
+  const blockmap = files.find((file) => file.role === 'blockmap');
+  if (blockmap) {
+    const archive = files.find((file) => file.role === (platform === 'mac' ? 'zip' : 'installer'))!;
+    if (blockmap.name !== `${archive.name}.blockmap`) {
+      throw badRequest('invalid_files', `The blockmap must be named ${archive.name}.blockmap`);
     }
   }
   return files;
 }
 
-function checkNewer(releases: Release[], version: string, build: number): void {
+/**
+ * Checks the version rules for publishing `platform` of `version`, and returns
+ * the build to use. Either it's a new release, newer than every release, or a
+ * new platform for an existing release.
+ */
+function checkVersion(releases: Release[], platform: Platform, version: string, build: number | undefined, names: string[]): number {
+  const label = PLATFORM_NAMES[platform];
+  const existing = releases.find((release) => release.version === version);
+  if (existing) {
+    if (hasPlatform(existing, platform)) {
+      throw new HttpError(409, 'already_published', `${version} is already published for ${label}`);
+    }
+    if (existing.withdrawn) throw new HttpError(409, 'release_withdrawn', `${version} was withdrawn; restore it first or publish a newer version`);
+    for (const release of releases) {
+      if (release !== existing && hasPlatform(release, platform) && compareVersions(version, release.version) <= 0) {
+        throw new HttpError(409, 'version_not_newer', `${version} is not newer than ${label}'s ${release.version}`);
+      }
+    }
+    if (build !== undefined && build !== existing.build) {
+      throw new HttpError(409, 'build_mismatch', `${version} already has build ${existing.build}, not ${build}`);
+    }
+    const clash = names.find((name) => existing.files.some((file) => file.name === name));
+    if (clash) throw new HttpError(409, 'file_exists', `${version} already has a file named ${clash}`);
+    return existing.build;
+  }
+
+  const resolved = build ?? defaultBuild(version);
   for (const release of releases) {
     if (compareVersions(version, release.version) <= 0) {
       throw new HttpError(409, 'version_not_newer', `${version} is not newer than ${release.version}`);
     }
-    if (build <= release.build) {
-      throw new HttpError(409, 'build_not_higher', `Build ${build} is not higher than ${release.version}'s build ${release.build}`);
+    if (resolved <= release.build) {
+      throw new HttpError(409, 'build_not_higher', `Build ${resolved} is not higher than ${release.version}'s build ${release.build}`);
     }
   }
+  return resolved;
 }
 
 export async function startUpload(store: Store, app: AppRecord, body: unknown): Promise<UploadState> {
   if (!isObject(body)) throw badRequest('invalid_body', 'Send a JSON object');
   const { version, notes, minimumSystemVersion, edSignature } = body;
+  const platform = body.platform ?? 'mac';
+  if (!isPlatform(platform)) throw badRequest('invalid_platform', 'platform must be mac or windows');
   if (!isVersion(version)) throw badRequest('invalid_version', 'version must look like 1.2.3');
-  const build = body.build ?? defaultBuild(version);
-  if (typeof build !== 'number' || !Number.isSafeInteger(build) || build < 1) {
+  const build = body.build;
+  if (build !== undefined && (typeof build !== 'number' || !Number.isSafeInteger(build) || build < 1)) {
     throw badRequest('invalid_build', 'build must be a positive integer');
   }
   if (notes !== undefined && (typeof notes !== 'string' || notes.length > MAX_NOTES)) {
     throw badRequest('invalid_notes', 'notes must be markdown text under 100,000 characters');
   }
-  if (minimumSystemVersion !== undefined && (typeof minimumSystemVersion !== 'string' || !MIN_SYSTEM_RE.test(minimumSystemVersion))) {
-    throw badRequest('invalid_minimum_system_version', 'minimumSystemVersion must look like 13.0');
+  if (minimumSystemVersion !== undefined && (typeof minimumSystemVersion !== 'string' || !MIN_SYSTEM_RE[platform].test(minimumSystemVersion))) {
+    throw badRequest('invalid_minimum_system_version', `minimumSystemVersion must look like ${platform === 'mac' ? '13.0' : '10.0 or 10.0.17763'}`);
   }
   if (app.updater === 'sparkle') {
-    if (!isSparkleSignature(edSignature)) throw badRequest('invalid_signature', 'Sparkle apps need edSignature: base64 Ed25519 signature of the DMG');
+    const what = platform === 'mac' ? 'the DMG' : 'the installer';
+    if (!isSparkleSignature(edSignature)) throw badRequest('invalid_signature', `Sparkle apps need edSignature: base64 Ed25519 signature of ${what}`);
   } else if (edSignature !== undefined) {
     throw badRequest('invalid_signature', 'edSignature is only for Sparkle apps');
   }
-  const files = parseFiles(app, body.files);
-  checkNewer(await store.listReleases(app.name), version, build);
+  const files = parseFiles(app, platform, body.files);
+  const resolvedBuild = checkVersion(await store.listReleases(app.name), platform, version, build as number | undefined, files.map((file) => file.name));
 
   const now = Date.now();
   const state: UploadState = {
     id: randomBytes(16).toString('hex'),
     app: app.name,
+    platform,
     version,
-    build,
+    build: resolvedBuild,
     notes: typeof notes === 'string' ? notes : '',
     ...(typeof minimumSystemVersion === 'string' ? { minimumSystemVersion } : {}),
     ...(typeof edSignature === 'string' ? { edSignature } : {}),
@@ -207,10 +267,14 @@ async function digestFile(file: string): Promise<{ size: number; sha256: string;
   return { size, sha256: sha256.digest('hex'), sha512: sha512.digest('base64') };
 }
 
-/** Publishes an upload: verifies every file, then moves them into place and writes release.json last. */
+/**
+ * Publishes an upload: verifies every file, then moves them into place and
+ * writes release.json last. A new platform's files join the existing release.
+ */
 export async function commitUpload(store: Store, app: AppRecord, id: string): Promise<Release> {
   return store.withLock(app.name, async () => {
     const state = await loadUpload(store, app.name, id);
+    const platform = state.platform ?? 'mac';
     const filesDir = path.join(uploadDir(store, id), 'files');
 
     const files: ReleaseFile[] = [];
@@ -225,35 +289,48 @@ export async function commitUpload(store: Store, app: AppRecord, id: string): Pr
       if (digest.size !== declared.size || digest.sha256 !== declared.sha256) {
         throw new HttpError(409, 'files_changed', `${declared.name} no longer matches what was declared`);
       }
-      files.push({ ...declared, sha512: digest.sha512 });
+      files.push({ ...declared, platform, sha512: digest.sha512 });
     }
 
     if (app.updater === 'sparkle') {
-      const dmg = files.find((file) => file.role === 'dmg')!;
-      const data = await fs.readFile(path.join(filesDir, dmg.name));
+      const signed = files.find((file) => file.role === (platform === 'mac' ? 'dmg' : 'installer'))!;
+      const data = await fs.readFile(path.join(filesDir, signed.name));
       if (!app.sparklePublicKey || !verifySparkleSignature(app.sparklePublicKey, data, state.edSignature ?? '')) {
         throw new HttpError(422, 'bad_signature', `edSignature doesn't verify against ${app.name}'s Sparkle public key`);
       }
+      signed.edSignature = state.edSignature;
     }
 
-    checkNewer(await store.listReleases(app.name), state.version, state.build);
+    // The other platform may have published this version since the upload started.
+    const releases = await store.listReleases(app.name);
+    checkVersion(releases, platform, state.version, state.build, files.map((file) => file.name));
+    const existing = releases.find((release) => release.version === state.version);
 
     const target = store.releaseDir(app.name, state.version);
-    await fs.rm(target, { recursive: true, force: true }); // a leftover from an interrupted commit has no release.json
+    // A leftover from an interrupted commit has no release.json, or isn't listed in it, so it's replaced.
+    if (!existing) await fs.rm(target, { recursive: true, force: true });
     await fs.mkdir(target, { recursive: true });
     for (const file of files) {
       await fs.rename(path.join(filesDir, file.name), path.join(target, file.name));
     }
-    const release: Release = {
-      version: state.version,
-      build: state.build,
-      notes: state.notes,
-      publishedAt: new Date().toISOString(),
-      ...(state.minimumSystemVersion ? { minimumSystemVersion: state.minimumSystemVersion } : {}),
-      withdrawn: false,
-      ...(state.edSignature ? { edSignature: state.edSignature } : {}),
-      files,
-    };
+    const now = new Date().toISOString();
+    const info = { publishedAt: now, ...(state.minimumSystemVersion ? { minimumSystemVersion: state.minimumSystemVersion } : {}) };
+    const release: Release = existing
+      ? {
+          ...existing,
+          notes: existing.notes.trim() ? existing.notes : state.notes,
+          platforms: { ...existing.platforms, [platform]: info },
+          files: [...existing.files, ...files],
+        }
+      : {
+          version: state.version,
+          build: state.build,
+          notes: state.notes,
+          publishedAt: now,
+          withdrawn: false,
+          platforms: { [platform]: info },
+          files,
+        };
     await store.saveRelease(app.name, release);
 
     // Keep a tombstone until the upload expires, so a repeated commit gets 409 already_published.

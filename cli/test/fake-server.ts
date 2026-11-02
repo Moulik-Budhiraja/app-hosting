@@ -5,10 +5,12 @@ import type { AddressInfo } from "node:net";
 
 const SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
-interface StoredFile { name: string; role: string; size: number; sha256: string; sha512?: string; data?: Buffer }
+type Platform = "mac" | "windows";
+interface StoredFile { name: string; platform: Platform; role: string; size: number; sha256: string; sha512?: string; edSignature?: string; data?: Buffer }
 interface StoredRelease {
-  version: string; build: number; notes?: string; publishedAt: string; minimumSystemVersion?: string;
-  withdrawn: boolean; edSignature?: string; files: StoredFile[];
+  version: string; build: number; notes?: string; publishedAt: string;
+  platforms: Partial<Record<Platform, { publishedAt: string; minimumSystemVersion?: string }>>;
+  withdrawn: boolean; files: StoredFile[];
 }
 interface StoredApp { name: string; title: string; updater: "sparkle" | "electron"; sparklePublicKey?: string; icon?: { sha256: string; size: number; updatedAt: string }; iconData?: Buffer; createdAt: string; releases: StoredRelease[] }
 interface Upload { id: string; app: string; start: Record<string, unknown>; files: Map<string, Buffer>; committed: boolean }
@@ -27,6 +29,24 @@ function newer(a: string, b: string): boolean {
   const right = b.split(".").map(Number);
   for (let i = 0; i < 3; i += 1) if (left[i] !== right[i]) return left[i]! > right[i]!;
   return false;
+}
+
+/** The version rules from DESIGN.md: a new release, or a new platform for an existing one. */
+function checkVersion(app: StoredApp, body: { version: string; platform: Platform; build?: number }): { code: string; message: string } | null {
+  const existing = app.releases.find((release) => release.version === body.version);
+  if (existing) {
+    if (existing.files.some((file) => file.platform === body.platform)) return { code: "already_published", message: `${body.version} already has ${body.platform} files` };
+    if (existing.withdrawn) return { code: "release_withdrawn", message: `${body.version} is withdrawn` };
+    if (body.build !== undefined && body.build !== existing.build) return { code: "build_mismatch", message: `${body.version} is build ${existing.build}` };
+    body.build = existing.build;
+    const newerSame = app.releases.find((release) => release !== existing && release.files.some((file) => file.platform === body.platform) && !newer(body.version, release.version));
+    if (newerSame) return { code: "version_not_newer", message: `${body.version} isn't newer than ${newerSame.version}` };
+    return null;
+  }
+  if (app.releases.some((release) => !newer(body.version, release.version))) {
+    return { code: "version_not_newer", message: `${body.version} isn't newer than every release` };
+  }
+  return null;
 }
 
 export async function startFakeServer(): Promise<FakeServer> {
@@ -68,15 +88,21 @@ export async function startFakeServer(): Promise<FakeServer> {
     if (parts[0] !== "api") {
       const app = apps.get(parts[0] ?? "");
       if (!app) return fail(res, 404, "not_found", "Not found");
-      const live = [...app.releases].filter((release) => !release.withdrawn).sort((a, b) => b.build - a.build);
-      if (parts[1] === "releases.json") return send(res, 200, app.releases.map(publicRelease));
-      if (parts[1] === "appcast.xml" && app.updater === "sparkle") {
-        const items = live.map((release) => `<item><title>${release.version}</title><sparkle:version>${release.build}</sparkle:version><sparkle:shortVersionString>${release.version}</sparkle:shortVersionString></item>`).join("");
+      const live = (platform: Platform) => [...app.releases]
+        .filter((release) => !release.withdrawn && release.files.some((file) => file.platform === platform))
+        .sort((a, b) => b.build - a.build);
+      if (parts[1] === "releases.json") return send(res, 200, app.releases.filter((release) => !release.withdrawn).map(publicRelease));
+      const appcasts: Record<string, Platform> = { "appcast.xml": "mac", "appcast-windows.xml": "windows" };
+      if (appcasts[parts[1] ?? ""] && app.updater === "sparkle") {
+        const platform = appcasts[parts[1]!]!;
+        const items = live(platform).map((release) => `<item><title>${release.version}</title><sparkle:version>${platform === "mac" ? release.build : release.version}</sparkle:version><sparkle:shortVersionString>${release.version}</sparkle:shortVersionString></item>`).join("");
         return send(res, 200, `<?xml version="1.0"?><rss><channel>${items}</channel></rss>`, "application/xml");
       }
-      if (parts[1] === "latest-mac.yml" && app.updater === "electron") {
-        if (!live[0]) return fail(res, 404, "not_found", "No releases");
-        return send(res, 200, `version: ${live[0].version}\npath: x\n`, "text/yaml");
+      const ymls: Record<string, Platform> = { "latest-mac.yml": "mac", "latest.yml": "windows" };
+      if (ymls[parts[1] ?? ""] && app.updater === "electron") {
+        const latest = live(ymls[parts[1]!]!)[0];
+        if (!latest) return fail(res, 404, "not_found", "No releases");
+        return send(res, 200, `version: ${JSON.stringify(latest.version)}\npath: "x"\n`, "text/yaml");
       }
       return fail(res, 404, "not_found", "Not found");
     }
@@ -162,12 +188,12 @@ export async function startFakeServer(): Promise<FakeServer> {
     if (parts[3] === "uploads") {
       if (parts.length === 4 && req.method === "POST") {
         const body = JSON.parse((await readBody(req)).toString("utf8"));
-        if (app.releases.some((release) => !newer(body.version, release.version))) {
-          return fail(res, 409, "not_newer", `${body.version} isn't newer than every release`);
-        }
+        body.platform ??= "mac";
+        const problem = checkVersion(app, body);
+        if (problem) return fail(res, 409, problem.code, problem.message);
         const id = randomBytes(6).toString("hex");
         uploads.set(id, { id, app: app.name, start: body, files: new Map(), committed: false });
-        return send(res, 201, { uploadId: id, expiresAt: new Date(Date.now() + 6 * 3600_000).toISOString() });
+        return send(res, 201, { uploadId: id, expiresAt: new Date(Date.now() + 6 * 3600_000).toISOString(), version: body.version, build: body.build });
       }
       const upload = uploads.get(parts[4] ?? "");
       if (!upload || upload.app !== app.name) return fail(res, 404, "not_found", "No such upload");
@@ -185,29 +211,42 @@ export async function startFakeServer(): Promise<FakeServer> {
       if (parts[5] === "commit" && parts.length === 6 && req.method === "POST") {
         if (upload.committed) return fail(res, 409, "already_published", "Already published");
         for (const spec of declared) if (!upload.files.has(spec.name)) return fail(res, 422, "missing_file", `${spec.name} wasn't uploaded`);
-        const start = upload.start as { version: string; build: number; notes?: string; edSignature?: string; minimumSystemVersion?: string };
+        const start = upload.start as { version: string; platform: Platform; build: number; notes?: string; edSignature?: string; minimumSystemVersion?: string };
+        const signed = declared.find((item) => item.role === (start.platform === "mac" ? "dmg" : "installer"))!;
         if (app.updater === "sparkle") {
-          const dmg = declared.find((item) => item.role === "dmg")!;
           const key = createPublicKey({ key: Buffer.concat([SPKI_PREFIX, Buffer.from(app.sparklePublicKey!, "base64")]), format: "der", type: "spki" });
-          if (!start.edSignature || !verify(null, upload.files.get(dmg.name)!, key, Buffer.from(start.edSignature, "base64"))) {
+          if (!start.edSignature || !verify(null, upload.files.get(signed.name)!, key, Buffer.from(start.edSignature, "base64"))) {
             return fail(res, 422, "bad_signature", "edSignature doesn't verify");
           }
         }
-        const release: StoredRelease = {
-          version: start.version,
-          build: start.build,
-          notes: start.notes,
-          minimumSystemVersion: start.minimumSystemVersion,
-          publishedAt: new Date().toISOString(),
-          withdrawn: false,
-          edSignature: start.edSignature,
-          files: declared.map((spec) => ({
-            ...spec,
-            sha512: createHash("sha512").update(upload.files.get(spec.name)!).digest("base64"),
-            data: upload.files.get(spec.name)!,
-          })),
-        };
-        app.releases.push(release);
+        const problem = checkVersion(app, start);
+        if (problem) return fail(res, 409, problem.code, problem.message);
+        const now = new Date().toISOString();
+        const files: StoredFile[] = declared.map((spec) => ({
+          ...spec,
+          platform: start.platform,
+          sha512: createHash("sha512").update(upload.files.get(spec.name)!).digest("base64"),
+          ...(spec.name === signed.name && start.edSignature ? { edSignature: start.edSignature } : {}),
+          data: upload.files.get(spec.name)!,
+        }));
+        const platformInfo = { publishedAt: now, ...(start.minimumSystemVersion ? { minimumSystemVersion: start.minimumSystemVersion } : {}) };
+        let release = app.releases.find((item) => item.version === start.version);
+        if (release) {
+          release.files.push(...files);
+          release.platforms[start.platform] = platformInfo;
+          if (!release.notes && start.notes) release.notes = start.notes;
+        } else {
+          release = {
+            version: start.version,
+            build: start.build,
+            notes: start.notes,
+            publishedAt: now,
+            platforms: { [start.platform]: platformInfo },
+            withdrawn: false,
+            files,
+          };
+          app.releases.push(release);
+        }
         upload.committed = true;
         return send(res, 201, publicRelease(release));
       }

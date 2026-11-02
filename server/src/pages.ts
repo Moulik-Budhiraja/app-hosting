@@ -1,7 +1,8 @@
-import { fileWithRole, liveReleases } from './feeds.ts';
+import { downloadFile, platformDate, platformReleases } from './feeds.ts';
 import { iconVersion } from './icons.ts';
 import { escapeHtml, markdownToHtml } from './markdown.ts';
-import type { AppRecord, Release } from './store.ts';
+import type { AppRecord, Platform, Release } from './store.ts';
+import { PLATFORMS } from './store.ts';
 
 // The design lives in the Paper file "app-hosting — Download pages redesign".
 // Icons are drawn on Apple's grid, with about 10% transparent margin, so icon
@@ -30,6 +31,8 @@ h2{margin:0;font-size:17px;line-height:22px;font-weight:600}
 .button:hover{filter:brightness(1.08)}
 .button svg{flex-shrink:0}
 .req{font-size:13px;line-height:18px;color:var(--secondary)}
+.side{display:flex;flex-direction:column;gap:2px}
+.also{font-size:13px;line-height:18px;font-weight:500}
 section{padding-top:48px}
 .app+section{padding-top:64px}
 .notes{max-width:560px;padding-top:12px}
@@ -64,7 +67,8 @@ main{padding:32px 20px 64px}
 .info{align-self:center}
 .get{flex-direction:column;align-items:stretch;gap:10px;margin-left:10px}
 .button{height:50px;border-radius:12px}
-.req{text-align:center}
+.side{align-items:center;gap:12px}
+.req,.also{text-align:center}
 section{padding-top:40px}
 .app+section{padding-top:48px}
 .versions li{grid-template-columns:72px 1fr 64px}
@@ -110,6 +114,19 @@ export function formatMacOS(version: string): string {
   return `macOS ${version.replace(/(\.0)+$/, '')}`;
 }
 
+/** "10.0" reads as "Windows 10", "10.0.17763" as "Windows 10 build 17763", "10.0.22000" as "Windows 11". */
+export function formatWindows(version: string): string {
+  const [major = '', minor = '0', build] = version.split('.');
+  const base = minor === '0' ? major : `${major}.${minor}`;
+  if (base === '10' && build && Number(build) >= 22000) {
+    return build === '22000' ? 'Windows 11' : `Windows 11 build ${build}`;
+  }
+  return build ? `Windows ${base} build ${build}` : `Windows ${base}`;
+}
+
+const BUTTON_LABELS: Record<Platform, string> = { mac: 'Download for Mac', windows: 'Download for Windows' };
+const ALSO_LABELS: Record<Platform, string> = { mac: 'Also for Mac', windows: 'Also for Windows' };
+
 /** The app's icon, or a tile with its initial. `base` is the path from the page to the app's folder. */
 function appIcon(app: AppRecord, base: string): string {
   const version = iconVersion(app);
@@ -131,24 +148,46 @@ export function indexPage(remote: string, apps: { app: AppRecord; latest: Releas
   return page(`${remote} apps`, `<h1>Apps</h1>${list}`);
 }
 
-/** The download page. Links are relative so it also works at an alias host's root. */
-export function appPage(_remote: string, app: AppRecord, releases: Release[]): string {
-  const live = liveReleases(releases);
-  const latest = live[0];
-  const title = `<h1>${escapeHtml(app.title)}</h1>`;
+/**
+ * Which platform a download page shows: the one asked for, else the visitor's,
+ * else macOS, else Windows, among those with live releases. Null when there are none.
+ */
+export function pagePlatform(releases: Release[], requested: Platform | null, visitor: Platform | null): Platform | null {
+  const available = PLATFORMS.filter((platform) => platformReleases(releases, platform).length > 0);
+  for (const candidate of [requested, visitor, ...PLATFORMS]) {
+    if (candidate && available.includes(candidate)) return candidate;
+  }
+  return null;
+}
 
-  if (!latest) {
+/** The download page for one platform. Links are relative so it also works at an alias host's root. */
+export function appPage(
+  _remote: string,
+  app: AppRecord,
+  releases: Release[],
+  choice: { requested: Platform | null; visitor: Platform | null } = { requested: null, visitor: null },
+): string {
+  const title = `<h1>${escapeHtml(app.title)}</h1>`;
+  const platform = pagePlatform(releases, choice.requested, choice.visitor);
+  if (!platform) {
     const body = `<header class="app">${appIcon(app, '')}<div class="info">${title}<p class="meta">No releases yet</p></div></header>`;
     return page(app.title, body);
   }
 
-  const dmg = fileWithRole(latest, 'dmg');
-  const requirements = [dmg ? formatSize(dmg.size) : '', latest.minimumSystemVersion ? `${formatMacOS(latest.minimumSystemVersion)} or later` : '']
-    .filter(Boolean)
-    .map(escapeHtml)
-    .join(' · ');
-  let body = `<header class="app">${appIcon(app, '')}<div class="info">${title}<p class="meta">Version ${escapeHtml(latest.version)} · ${formatDate(latest.publishedAt)}</p></div>`;
-  body += `<div class="get"><a class="button" href="download">${DOWNLOAD_ICON}Download for Mac</a>${requirements ? `<span class="req">${requirements}</span>` : ''}</div></header>`;
+  const live = platformReleases(releases, platform);
+  const latest = live[0]!;
+  const file = downloadFile(latest, platform);
+  const minimum = latest.platforms[platform]?.minimumSystemVersion;
+  const system = minimum ? `${platform === 'mac' ? formatMacOS(minimum) : formatWindows(minimum)} or later` : '';
+  const requirements = [file ? formatSize(file.size) : '', system].filter(Boolean).map(escapeHtml).join(' · ');
+  const other = PLATFORMS.find((candidate) => candidate !== platform && platformReleases(releases, candidate).length > 0);
+
+  let body = `<header class="app">${appIcon(app, '')}<div class="info">${title}<p class="meta">Version ${escapeHtml(latest.version)} · ${formatDate(platformDate(latest, platform))}</p></div>`;
+  body += `<div class="get"><a class="button" href="download/${platform}">${DOWNLOAD_ICON}${BUTTON_LABELS[platform]}</a>`;
+  const side = (requirements ? `<span class="req">${requirements}</span>` : '')
+    + (other ? `<a class="also" href="?platform=${other}">${ALSO_LABELS[other]}</a>` : '');
+  if (side) body += `<span class="side">${side}</span>`;
+  body += '</div></header>';
 
   if (latest.notes.trim()) {
     body += `<section><h2>What’s new</h2><div class="notes">${markdownToHtml(latest.notes)}</div></section>`;
@@ -157,10 +196,10 @@ export function appPage(_remote: string, app: AppRecord, releases: Release[]): s
   if (older.length) {
     body += `<section><h2>Earlier versions</h2><ul class="versions">${older
       .map((release) => {
-        const file = fileWithRole(release, 'dmg');
+        const olderFile = downloadFile(release, platform);
         const version = escapeHtml(release.version);
-        const link = file ? `<a href="releases/${release.version}/${encodeURIComponent(file.name)}">${version}</a>` : `<span>${version}</span>`;
-        return `<li>${link}<span>${formatDate(release.publishedAt)}</span><span class="size">${file ? formatSize(file.size) : ''}</span></li>`;
+        const link = olderFile ? `<a href="releases/${release.version}/${encodeURIComponent(olderFile.name)}">${version}</a>` : `<span>${version}</span>`;
+        return `<li>${link}<span>${formatDate(platformDate(release, platform))}</span><span class="size">${olderFile ? formatSize(olderFile.size) : ''}</span></li>`;
       })
       .join('')}</ul></section>`;
   }

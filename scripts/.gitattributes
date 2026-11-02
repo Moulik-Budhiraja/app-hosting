@@ -1,0 +1,2 @@
+# Windows runners check out with core.autocrlf, and bash fails on CRLF.
+*.sh text eol=lf

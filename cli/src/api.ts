@@ -1,11 +1,23 @@
+import type { Platform } from "./appfile.js";
 import { CliError, EXIT } from "./errors.js";
+
+export type Role = "dmg" | "zip" | "blockmap" | "installer";
 
 export interface ReleaseFile {
   name: string;
-  role: "dmg" | "zip" | "blockmap";
+  /** Missing from older servers, whose releases are all macOS. */
+  platform?: Platform;
+  role: Role;
   size: number;
   sha256?: string;
   sha512?: string;
+  edSignature?: string;
+  url?: string;
+}
+
+export interface PlatformRelease {
+  publishedAt?: string;
+  minimumSystemVersion?: string;
 }
 
 export interface Release {
@@ -13,10 +25,30 @@ export interface Release {
   build: number;
   notes?: string;
   publishedAt: string;
-  minimumSystemVersion?: string;
+  /** Older servers keep the macOS minimum and signature at the top instead. */
+  minimumSystemVersion?: string | null;
   withdrawn?: boolean;
   edSignature?: string;
+  platforms?: Partial<Record<Platform, PlatformRelease>>;
   files: ReleaseFile[];
+}
+
+export function filePlatform(file: ReleaseFile): Platform {
+  return file.platform ?? "mac";
+}
+
+export function hasPlatform(release: Release, platform: Platform): boolean {
+  return release.files.some((file) => filePlatform(file) === platform);
+}
+
+/** The platforms a release has files for, macOS first. */
+export function releasePlatforms(release: Release): Platform[] {
+  return (["mac", "windows"] as const).filter((platform) => hasPlatform(release, platform));
+}
+
+/** When a platform of a release was published, falling back to the release itself. */
+export function platformPublishedAt(release: Release, platform: Platform): string {
+  return release.platforms?.[platform]?.publishedAt ?? release.publishedAt;
 }
 
 export interface AppIcon {
@@ -31,7 +63,7 @@ export interface AppInfo {
   updater: "sparkle" | "electron";
   sparklePublicKey?: string;
   icon?: AppIcon;
-  urls?: { page: string; download: string; feed: string; updateBase: string; icon?: string };
+  urls?: { page: string; download: string; feed: string; feeds?: Partial<Record<Platform, string>>; updateBase: string; icon?: string };
   createdAt?: string;
   releases?: Release[];
   latest?: Release | null;
@@ -51,11 +83,12 @@ export interface TokenInfo {
 
 export interface UploadStart {
   version: string;
+  platform: Platform;
   build?: number;
   notes?: string;
   minimumSystemVersion?: string;
   edSignature?: string;
-  files: { name: string; role: ReleaseFile["role"]; size: number; sha256: string }[];
+  files: { name: string; role: Role; size: number; sha256: string }[];
 }
 
 export class ApiError extends CliError {

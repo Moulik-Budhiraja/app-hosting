@@ -10,6 +10,13 @@ const TYPES: Record<string, string> = {
   blockmap: 'application/octet-stream',
 };
 
+function contentType(file: ReleaseFile): string {
+  if (file.role === 'installer') {
+    return file.name.toLowerCase().endsWith('.msi') ? 'application/x-msi' : 'application/vnd.microsoft.portable-executable';
+  }
+  return TYPES[file.role] ?? 'application/octet-stream';
+}
+
 /** Parses a single-range Range header. Returns null for a range this server won't honor. */
 export function parseRange(header: string, size: number): { start: number; end: number } | null | 'unsatisfiable' {
   const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
@@ -33,7 +40,7 @@ export function parseRange(header: string, size: number): { start: number; end: 
 export async function serveReleaseFile(req: IncomingMessage, res: ServerResponse, diskPath: string, file: ReleaseFile): Promise<void> {
   const etag = `"${file.sha256.slice(0, 32)}"`;
   const headers = {
-    'content-type': TYPES[file.role] ?? 'application/octet-stream',
+    'content-type': contentType(file),
     'cache-control': 'public, max-age=31536000, immutable',
     'accept-ranges': 'bytes',
     etag,
