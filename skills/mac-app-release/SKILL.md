@@ -12,10 +12,43 @@ reusable workflows in `Moulik-Budhiraja/app-hosting` (local checkout:
 
 How a release works: you push a tag `v1.2.3` on main. The app's
 `.github/workflows/release.yml` then runs a job per platform in `apps.json`:
-- `release-mac.yml` runs on the `macos-ephemeral` runner. It builds the app, signs it
-  with the Developer ID, notarizes the app and the DMG, and runs `apps publish`.
-- `release-windows.yml` runs on a Windows runner. It builds the installer, signs it
-  with Azure Artifact Signing, and runs `apps publish --platform windows`.
+- The Mac job runs on the `macos-ephemeral` runner. It builds the app, signs it with
+  the Developer ID, notarizes the app and the DMG, and runs `apps publish`.
+- The Windows job runs on a Windows runner. It builds the installer, signs it with
+  Azure Artifact Signing, and runs `apps publish --platform windows`.
+
+The steps live in the composite actions `actions/release-mac` and
+`actions/release-windows`. How `release.yml` reaches them depends on who owns the repo,
+and `apps init` writes the right form:
+- **Repos owned by `Moulik-Budhiraja`** call the reusable workflows
+  `release-mac.yml` and `release-windows.yml` with `secrets: inherit`. They wrap the
+  actions.
+- **Repos owned by anyone else (`Proletic/*` and every app on the `proletic` remote)**
+  must run the actions in their own jobs. `secrets: inherit` doesn't pass secrets to
+  another owner's reusable workflow, and neither do environment secrets: the called job
+  gets only `github_token`. The job declares `runs-on`, `environment: production`,
+  `timeout-minutes: 90` and its concurrency group, and passes
+  `secrets: ${{ toJSON(secrets) }}` to the action:
+  ```yaml
+  windows:
+    runs-on: [self-hosted, windows]
+    environment: production
+    timeout-minutes: 90
+    concurrency:
+      group: release-windows-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: Moulik-Budhiraja/app-hosting/actions/release-windows@main
+        with:
+          secrets: ${{ toJSON(secrets) }}
+  ```
+  The Mac job is the same with `runs-on: [self-hosted, macos-ephemeral]` and
+  `actions/release-mac`. The action reads only the release secrets and the names in
+  `build-secrets` from that JSON.
+
+The `directory` and `build-secrets` inputs work the same in both forms. `tooling-ref`
+and `runs-on` are reusable-workflow inputs. With the actions, the ref after `@` picks
+the tooling and the job sets `runs-on`.
 
 The jobs publish on their own into the same release, so a failed Windows build doesn't
 hold back the Mac one; re-run it and it joins the release. The remote serves:
@@ -159,7 +192,8 @@ electron-builder 26 notes, from release runs on the Windows pool. They apply on 
   default artifact name, so the paths in `apps.json` don't match.
 
 Monorepo: set `"tagPrefix": "app/v"` and tag `app/v1.2.3`. If `apps.json` isn't at the
-repo root, pass `with: { directory: path }` to each job in `release.yml`.
+repo root, pass `with: { directory: path }` to each job in `release.yml` (to the action's
+step in the composite-action form).
 
 Build-time secrets: if `command` needs a secret, such as an OAuth client file the app
 bundles, put it in the repo's `production` environment and list it in `release.yml`
@@ -192,7 +226,8 @@ Hyper-V VM per job on the user's Windows machine, deleted afterwards. It has Git
 PowerShell 7, VS 2022 Build Tools, the .NET SDK, the Windows SDK and the Artifact
 Signing client tools. It serves private repos under Moulik-Budhiraja and Proletic, and
 public repos only from its controller's allowlist (ask the user to add the repo). Pass
-`with: { runs-on: '"windows-latest"' }` in `release.yml` to use GitHub's hosted runner.
+`with: { runs-on: '"windows-latest"' }` in `release.yml` to use GitHub's hosted runner
+(with the action, set the job's `runs-on: windows-latest`).
 Any runner needs Git for Windows (its `bash` first on PATH, not WSL's) and PowerShell 7;
 the workflow sets up Node 24 and the .NET 8 runtime that signing needs.
 
@@ -290,7 +325,12 @@ installer, so the installer must close the running app (or the app must quit thr
   that the client secret hasn't expired, and that the app registration has the signer
   role on the account. Missing `.NET 8` means the setup-dotnet step didn't run.
 - **"build-secrets: X isn't set".** The secret is missing from the repo's `production`
-  environment and repo secrets, or `release.yml` doesn't pass `secrets: inherit`.
+  environment and repo secrets, or `release.yml` doesn't pass the secrets in
+  (`secrets: inherit`, or `secrets: ${{ toJSON(secrets) }}` to the action).
+- **"APPS_TOKEN didn't reach the release job", or every secret empty.** A repo owned by
+  another account than `Moulik-Budhiraja` is calling the reusable workflow, which gets
+  no secrets across owners. Switch `release.yml` to the composite-action form above.
+  In that form, check the job has `environment: production` and the `secrets` input.
 - **"isn't signed" for an Electron installer.** The command doesn't pass
   `--config electron-builder.config.js`, or `win.azureSignOptions` is missing or doesn't
   read the `AZURE_SIGNING_*` variables. A wrong artifact name has the same first cause.
@@ -316,7 +356,10 @@ installer, so the installer must close the running app (or the app must quit thr
   an app needs something the standard can't do, change the shared tooling in
   `Moulik-Budhiraja/app-hosting`, test it, and update `DESIGN.md`. Don't fork a copy
   into the app.
-- If `release.yml` pins `uses: …@<ref>`, pass the same ref as `with: { tooling-ref: <ref> }`.
+- If `release.yml` pins a reusable workflow at `@<ref>`, pass the same ref as
+  `with: { tooling-ref: <ref> }`. The actions need no such input.
+- Never point a repo outside `Moulik-Budhiraja` at the reusable workflows. Its release
+  job would get no secrets.
 - Never print, log, commit or paste secrets: certificates, passwords, API keys, Azure
   client secrets, Sparkle private keys, tokens. Pipe them straight into `gh secret set`
   or environment variables.

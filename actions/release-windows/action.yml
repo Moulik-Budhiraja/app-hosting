@@ -1,0 +1,228 @@
+# Builds, signs and publishes the Windows build of an app from a release tag.
+# It runs inside the caller's own job, so that job declares runs-on and
+# environment: production, and its secrets (environment secrets included) come
+# from the caller repo. Apps owned by another account than Moulik-Budhiraja
+# must use this form: GitHub's `secrets: inherit` doesn't reach a reusable
+# workflow across owners. A caller job:
+#
+#   windows:
+#     runs-on: [self-hosted, windows]
+#     environment: production
+#     timeout-minutes: 90
+#     concurrency:
+#       group: release-windows-${{ github.repository }}
+#       cancel-in-progress: false
+#     steps:
+#       - uses: Moulik-Budhiraja/app-hosting/actions/release-windows@main
+#         with:
+#           secrets: ${{ toJSON(secrets) }}
+#
+# release-windows.yml wraps this action for apps under Moulik-Budhiraja. The
+# runner needs Git for Windows (its bash first on PATH, not WSL's) and
+# PowerShell 7; the action sets up Node 24 and the .NET 8 runtime. See DESIGN.md.
+name: Release Windows app
+description: Build, sign and publish an app's Windows release from a release tag.
+
+inputs:
+  secrets:
+    description: >-
+      The job's secrets as JSON (toJSON of the secrets context). The action reads
+      APPS_TOKEN, SPARKLE_PRIVATE_KEY, the AZURE_* signing secrets and the names
+      in build-secrets from it, and nothing else.
+    required: true
+  directory:
+    description: Folder holding apps.json, relative to the repo root.
+    default: .
+  build-secrets:
+    description: >-
+      Names of extra secrets the build command needs, separated by spaces, commas
+      or newlines, such as GOOGLE_OAUTH_CLIENT_BASE64. Each one reaches the build
+      step as an environment variable of the same name. The run fails if one
+      isn't set.
+    default: ''
+  checkout:
+    description: >-
+      Check out the calling repo first. release-windows.yml checks it out itself
+      and passes false.
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Check out the app
+      if: inputs.checkout == 'true'
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Copy the release tooling
+      shell: pwsh
+      run: |
+        # The scripts and CLI come with the action, at the ref it was called at.
+        $root = (Resolve-Path (Join-Path $env:GITHUB_ACTION_PATH '../..')).Path
+        $dest = Join-Path $env:RUNNER_TEMP 'apps-tooling'
+        Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path $dest | Out-Null
+        Copy-Item -LiteralPath (Join-Path $root 'scripts'), (Join-Path $root 'cli') -Destination $dest -Recurse
+        "APPS_TOOLING=$dest" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+
+    - name: Read apps.json
+      id: config
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      run: |
+        bash "$APPS_TOOLING/scripts/common/read-config.sh" apps.json windows | tee -a "$GITHUB_OUTPUT"
+
+    - name: Check the secrets
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        APPS_TOKEN: ${{ fromJSON(inputs.secrets || '{}').APPS_TOKEN }}
+      run: |
+        if [[ -z $APPS_TOKEN ]]; then
+          echo "::error::APPS_TOKEN didn't reach the release job. The job needs environment: production, the action needs the secrets input set to the toJSON of the secrets context, and apps init sets the secrets."
+          exit 1
+        fi
+
+    - name: Check the tag
+      id: tag
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        REF_TYPE: ${{ github.ref_type }}
+        TAG: ${{ github.ref_name }}
+        PREFIX: ${{ steps.config.outputs.tag_prefix }}
+      run: |
+        [[ $REF_TYPE == tag ]] || { echo "Releases run from tags like ${PREFIX}1.2.3 pushed on main" >&2; exit 1; }
+        bash "$APPS_TOOLING/scripts/common/check-tag.sh" "$TAG" "$PREFIX" | tee -a "$GITHUB_OUTPUT"
+
+    - name: Skip if already published
+      id: existing
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        REMOTE_URL: ${{ steps.config.outputs.remote_url }}
+        APP: ${{ steps.config.outputs.app }}
+        VERSION: ${{ steps.tag.outputs.version }}
+      run: |
+        # An earlier attempt may have published this version for Windows
+        # already; the server would refuse it again. macOS files in the same
+        # release don't count.
+        published=$(bash "$APPS_TOOLING/scripts/common/published.sh" "$REMOTE_URL" "$APP" "$VERSION" windows)
+        echo "published=$published" >> "$GITHUB_OUTPUT"
+        if [[ $published == true ]]; then
+          echo "::notice::$APP $VERSION is already published for Windows on $REMOTE_URL; nothing to do."
+        fi
+
+    - name: Build the apps CLI
+      if: steps.existing.outputs.published != 'true'
+      shell: bash
+      run: |
+        cd "$APPS_TOOLING/cli"
+        npm ci --no-audit --no-fund
+        npm run build
+
+    - uses: actions/setup-dotnet@v4
+      if: steps.existing.outputs.published != 'true'
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Build and sign
+      id: build
+      if: steps.existing.outputs.published != 'true'
+      shell: pwsh
+      working-directory: ${{ inputs.directory }}
+      env:
+        VERSION: ${{ steps.tag.outputs.version }}
+        BUILD: ${{ steps.tag.outputs.build }}
+        AZURE_TENANT_ID: ${{ fromJSON(inputs.secrets || '{}').AZURE_TENANT_ID }}
+        AZURE_CLIENT_ID: ${{ fromJSON(inputs.secrets || '{}').AZURE_CLIENT_ID }}
+        AZURE_CLIENT_SECRET: ${{ fromJSON(inputs.secrets || '{}').AZURE_CLIENT_SECRET }}
+        AZURE_SIGNING_ENDPOINT: ${{ fromJSON(inputs.secrets || '{}').AZURE_SIGNING_ENDPOINT }}
+        AZURE_SIGNING_ACCOUNT: ${{ fromJSON(inputs.secrets || '{}').AZURE_SIGNING_ACCOUNT }}
+        AZURE_SIGNING_PROFILE: ${{ fromJSON(inputs.secrets || '{}').AZURE_SIGNING_PROFILE }}
+        AZURE_SIGNING_PUBLISHER: ${{ fromJSON(inputs.secrets || '{}').AZURE_SIGNING_PUBLISHER }}
+        # Only when the caller asks for build secrets. The wrapper hands the
+        # build just the named ones and drops these two variables.
+        APPS_BUILD_SECRETS: ${{ inputs.build-secrets }}
+        APPS_SECRETS_JSON: ${{ inputs.build-secrets != '' && inputs.secrets || '' }}
+      run: |
+        if ($env:APPS_BUILD_SECRETS) {
+          $pwsh = (Get-Process -Id $PID).Path
+          & node "$env:APPS_TOOLING/scripts/common/with-build-secrets.mjs" $pwsh -NoProfile -NonInteractive -File "$env:APPS_TOOLING/scripts/windows/build-release.ps1" apps.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        } else {
+          & "$env:APPS_TOOLING/scripts/windows/build-release.ps1" apps.json
+        }
+
+    - name: Release notes
+      id: notes
+      if: steps.existing.outputs.published != 'true'
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        TAG: ${{ github.ref_name }}
+      run: |
+        # An annotated tag's message becomes the release notes. actions/checkout
+        # fetches the pushed tag as a lightweight tag, so fetch the tag object.
+        git fetch --quiet --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+        file="$RUNNER_TEMP/release-notes.md"
+        if [[ $(git cat-file -t "refs/tags/$TAG") == tag ]]; then
+          git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG" | sed -e '/^-----BEGIN PGP SIGNATURE-----/,$d' > "$file"
+        fi
+        if [[ -s $file ]] && grep -q '[^[:space:]]' "$file"; then
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Publish
+      if: steps.existing.outputs.published != 'true'
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        APPS_TOKEN: ${{ fromJSON(inputs.secrets || '{}').APPS_TOKEN }}
+        SPARKLE_PRIVATE_KEY: ${{ fromJSON(inputs.secrets || '{}').SPARKLE_PRIVATE_KEY }}
+        VERSION: ${{ steps.tag.outputs.version }}
+        BUILD: ${{ steps.tag.outputs.build }}
+        INSTALLER: ${{ steps.build.outputs.installer }}
+        BLOCKMAP: ${{ steps.build.outputs.blockmap }}
+        MINIMUM_SYSTEM_VERSION: ${{ steps.build.outputs.minimum_system_version }}
+        ICON: ${{ steps.build.outputs.icon }}
+        NOTES_FILE: ${{ steps.notes.outputs.file }}
+      run: |
+        args=(publish --platform windows --version "$VERSION" --build "$BUILD" --installer "$INSTALLER")
+        [[ -n $BLOCKMAP ]] && args+=(--blockmap "$BLOCKMAP")
+        [[ -n $MINIMUM_SYSTEM_VERSION ]] && args+=(--minimum-system-version "$MINIMUM_SYSTEM_VERSION")
+        [[ -n $ICON ]] && args+=(--icon "$ICON")
+        [[ -n $NOTES_FILE ]] && args+=(--notes-file "$NOTES_FILE")
+        node "$APPS_TOOLING/cli/dist/index.js" "${args[@]}"
+
+    - name: Check the live feed
+      if: steps.existing.outputs.published != 'true'
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        REMOTE_URL: ${{ steps.config.outputs.remote_url }}
+        APP: ${{ steps.config.outputs.app }}
+        UPDATER: ${{ steps.config.outputs.updater }}
+        VERSION: ${{ steps.tag.outputs.version }}
+      run: |
+        if [[ $UPDATER == sparkle ]]; then
+          feed="$REMOTE_URL/$APP/appcast-windows.xml"
+          pattern="<sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>"
+        else
+          feed="$REMOTE_URL/$APP/latest.yml"
+          pattern="version: \"$VERSION\""
+        fi
+        for _ in $(seq 1 10); do
+          if curl --fail --silent --show-error --max-time 15 "$feed" | grep -qF "$pattern"; then
+            echo "$feed offers $VERSION"
+            exit 0
+          fi
+          sleep 3
+        done
+        echo "$feed doesn't offer $VERSION" >&2
+        exit 1

@@ -14,8 +14,10 @@ you change a contract here, change every part that uses it.
   (erasable syntax only: no enums, no parameter properties, `.ts` import suffixes).
 - `cli/`: the `apps` command. It knows several remotes, like git, and is logged in to
   each one separately. Node ≥ 22, compiled with `tsc` to `dist/`.
-- `.github/workflows/release-mac.yml` and `release-windows.yml`: reusable workflows
-  that apps call on a release tag, one per platform. They use `scripts/common/`
+- `actions/release-mac` and `actions/release-windows`: composite actions with the release
+  steps for one platform, run on a release tag. Apps owned by other accounts call them
+  from their own jobs. `.github/workflows/release-mac.yml` and `release-windows.yml` are
+  reusable workflows that wrap them for apps under `Moulik-Budhiraja`. They use `scripts/common/`
   (`read-config.mjs` and its `read-config.sh` wrapper, `check-tag.sh`, `published.sh`),
   `scripts/mac/*.sh` and `scripts/windows/*.ps1`.
 - `skills/mac-app-release/SKILL.md`: tells agents to use all of the above instead of
@@ -411,7 +413,7 @@ Re-running a commit that already succeeded returns 409 `already_published`.
 | `apps login <remote> [--token-stdin]` | prompt for the admin token (hidden), check it with `whoami`, store it |
 | `apps logout <remote>` | forget the token |
 | `apps create <app> --remote <r> --updater sparkle\|electron [--title T] [--kind native\|electron] [--platforms mac,windows]` | create the app on the remote (for sparkle: generate an Ed25519 key pair, keep the private key in the keychain, send the public key) and write `apps.json` with a default build for each platform. `--platforms` defaults to `mac` |
-| `apps init [--repo owner/name] [--signing-dir ~/.config/predictor-release]` | in a repo with `apps.json`: create the GitHub `production` environment, allowed only from `<tagPrefix>*` tags; set the environment secrets (below) for the platforms in `builds`; write `.github/workflows/release.yml` if missing; for a public repo, require approval for workflows from every external contributor's fork pull request and say that the runner must allowlist the repo; print what the app must contain for each platform |
+| `apps init [--repo owner/name] [--signing-dir ~/.config/predictor-release]` | in a repo with `apps.json`: create the GitHub `production` environment, allowed only from `<tagPrefix>*` tags; set the environment secrets (below) for the platforms in `builds`; write `.github/workflows/release.yml` if missing (calling the reusable workflows when the repo's owner is `Moulik-Budhiraja`, and running the composite actions in its own jobs otherwise); for a public repo, require approval for workflows from every external contributor's fork pull request and say that the runner must allowlist the repo; print what the app must contain for each platform |
 | `apps publish --version X [--platform mac\|windows] [--build N] [--notes-file f] [--minimum-system-version v] [--icon png]` and the platform's files: `--dmg p [--zip p] [--blockmap p]` for macOS, `--installer p [--blockmap p]` for Windows | read `apps.json`, sign the update file for sparkle, upload with progress, commit, set the icon if given (a failure there only warns), print the release. `--platform` defaults to `windows` when `--installer` is given and to `mac` otherwise |
 | `apps icon <png>` / `apps icon --remove` | set the app's icon, or remove it (admin) |
 | `apps releases [--app a --remote r]` | list releases, with their platforms. Logged in it reads the admin API, which includes withdrawn ones; otherwise it follows `releases.json`'s `next` pages |
@@ -433,10 +435,22 @@ Secrets that `apps init` sets on the GitHub `production` environment:
   `{"tenantId","clientId","clientSecret","endpoint","account","profile","publisher"}`.
   `publisher` is the subject name on the Artifact Signing certificate profile.
 
-## Reusable workflows
+## Release workflows
 
-The caller adds `.github/workflows/release.yml`, with a job for each platform in
-`builds`:
+The release steps live in two composite actions, `actions/release-mac` and
+`actions/release-windows`. An app repo runs them in one of two forms, and `apps init`
+writes the right one into `.github/workflows/release.yml`. Both forms run the same steps.
+The jobs run in parallel and publish on their own, so one platform failing doesn't hold
+back the other. Re-running a failed job publishes its platform into the same release.
+
+**The cross-owner rule.** GitHub's `secrets: inherit` only passes secrets to a reusable
+workflow owned by the same user, organization or enterprise as the caller. Environment
+secrets don't cross either, even though the called job declares `environment:
+production`. A repo owned by `Moulik-Budhiraja` can call the reusable workflows. A repo
+owned by anyone else, such as `Proletic`, gets only `github_token` there, so it must use
+the composite actions in its own jobs. That covers every app on the `proletic` remote.
+
+**Same owner (`Moulik-Budhiraja/*`): reusable workflows.**
 ```yaml
 name: Release
 on:
@@ -450,51 +464,99 @@ jobs:
     uses: Moulik-Budhiraja/app-hosting/.github/workflows/release-windows.yml@main
     secrets: inherit
 ```
-The jobs run in parallel and publish on their own, so one platform failing doesn't hold
-back the other. Re-running a failed job publishes its platform into the same release.
-
-Both workflows (`on: workflow_call`) take these inputs:
+`release-mac.yml` and `release-windows.yml` (`on: workflow_call`) are thin wrappers: one
+job with `environment: production`, `timeout-minutes: 90` and a non-cancelling
+concurrency group per repo and platform. It checks out the app, checks out
+`Moulik-Budhiraja/app-hosting` into `.apps-tooling` at `tooling-ref`, and runs
+`./.apps-tooling/actions/release-<platform>` with `checkout: false` and
+`secrets: ${{ toJSON(secrets) }}`. Their inputs:
 - `directory`: the folder holding `apps.json`, for monorepos. Default `.`.
-- `tooling-ref`: the ref of `Moulik-Budhiraja/app-hosting` to take scripts and the CLI
-  from. Default `main`. GitHub doesn't tell a called workflow its own ref, so a caller
-  that pins `@<ref>` should pass the same ref.
-- `build-secrets`: names of extra secrets the build `command` needs, separated by
-  spaces, commas or newlines, such as `with: { build-secrets: GOOGLE_OAUTH_CLIENT_BASE64 }`.
-  Default empty. See below.
+- `tooling-ref`: the ref of `Moulik-Budhiraja/app-hosting` to take the action, scripts
+  and CLI from. Default `main`. GitHub doesn't tell a called workflow its own ref, so a
+  caller that pins `@<ref>` should pass the same ref.
+- `build-secrets`: see below.
+- `runs-on` (`release-windows.yml` only): see below.
 
-`build-secrets` covers secrets the app bundles or uses at build time, such as an OAuth
-client file. They come from `secrets: inherit`, which includes the `production`
-environment's secrets because the job runs in that environment. When the input is set,
-the build step gets `toJSON(secrets)` and runs the build through
-`scripts/common/with-build-secrets.mjs`. That script starts `build-release.sh` (Mac) or
-`build-release.ps1` (Windows) with each listed secret as an environment variable of the
-same name, and without the JSON, so the build never sees the other secrets. The run
-fails before building if a listed secret is missing or empty, if a name isn't a valid
-variable name, or if it would replace a variable the build step already sets (such as
-`VERSION` or `AZURE_CLIENT_ID`). Names match secrets case-insensitively. GitHub masks
-the values in logs, and the script prints only the names. Only the build step gets
-them, not publishing. With the input empty, the build step runs as it did before.
-`release-local.sh` takes the same variables from the shell that runs it.
+**Other owners: composite actions in the caller's job.** The caller's job declares the
+runner, the environment, the timeout and the concurrency group itself, and passes its
+secrets in. Because the job runs in the caller repo with `environment: production`, its
+`secrets` context holds that environment's secrets, which stay limited to tags.
+```yaml
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: [self-hosted, macos-ephemeral]
+    environment: production
+    timeout-minutes: 90
+    concurrency:
+      group: release-mac-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: Moulik-Budhiraja/app-hosting/actions/release-mac@main
+        with:
+          secrets: ${{ toJSON(secrets) }}
+  windows:
+    runs-on: [self-hosted, windows]
+    environment: production
+    timeout-minutes: 90
+    concurrency:
+      group: release-windows-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: Moulik-Budhiraja/app-hosting/actions/release-windows@main
+        with:
+          secrets: ${{ toJSON(secrets) }}
+```
+The action takes the scripts and CLI from its own copy of the repo, at the ref after `@`,
+so it has no `tooling-ref`. Its inputs:
+- `secrets` (required): the job's secrets as JSON, `${{ toJSON(secrets) }}`. The action
+  reads only `APPS_TOKEN`, `SPARKLE_PRIVATE_KEY`, its platform's signing secrets
+  (`APPLE_*` or `AZURE_*`) and the names in `build-secrets`. GitHub masks the values in
+  logs.
+- `directory`: as above. Default `.`.
+- `build-secrets`: as above.
+- `checkout`: check out the calling repo first. Default `true`; the wrappers pass `false`.
 
-Both run one job with `environment: production`, `timeout-minutes: 90` and a
-non-cancelling concurrency group per repo and platform, and share these steps:
+`build-secrets` lists the names of extra secrets the build `command` needs, separated by
+spaces, commas or newlines, such as `with: { build-secrets: GOOGLE_OAUTH_CLIENT_BASE64 }`.
+Default empty. It covers secrets the app bundles or uses at build time, such as an OAuth
+client file, kept in the `production` environment. When it's set, the build step runs
+the build through `scripts/common/with-build-secrets.mjs`, given the secrets JSON. That
+script starts `build-release.sh` (Mac) or `build-release.ps1` (Windows) with each listed
+secret as an environment variable of the same name, and without the JSON, so the build
+never sees the other secrets. The run fails before building if a listed secret is
+missing or empty, if a name isn't a valid variable name, or if it would replace a
+variable the build step already sets (such as `VERSION` or `AZURE_CLIENT_ID`). Names
+match secrets case-insensitively. The script prints only the names. Only the build step
+gets them, not publishing. With the input empty, the build step runs the build script
+directly. `release-local.sh` takes the same variables from the shell that runs it.
 
-1. Check out the app repo with `fetch-depth: 0`, and check out `Moulik-Budhiraja/app-hosting`
-   into `.apps-tooling` at `tooling-ref`.
-2. `scripts/common/read-config.sh <apps.json> <platform>` reads `apps.json`, and
-   `scripts/common/check-tag.sh` checks that the tag is `<tagPrefix>X.Y.Z` and that the
+The action's steps, on both platforms:
+
+1. Check out the app repo with `fetch-depth: 0` (unless `checkout` is false), and copy the
+   action repo's `scripts` and `cli` to `$RUNNER_TEMP/apps-tooling` (`APPS_TOOLING`).
+2. Set up Node 24. `scripts/common/read-config.sh <apps.json> <platform>` reads
+   `apps.json`.
+3. Fail at once if `APPS_TOKEN` isn't in the secrets, which means the job lacks
+   `environment: production`, the `secrets` input, or the secrets themselves.
+4. `scripts/common/check-tag.sh` checks that the tag is `<tagPrefix>X.Y.Z` and that the
    tagged commit is on `origin/main`.
-3. The job skips itself if `scripts/common/published.sh` finds the version live with files
-   for its platform in `/<app>/releases/<version>.json`, for example after a local release
-   or a re-run.
-4. Set up Node 24, then build the CLI (`npm ci && npm run build` in `.apps-tooling/cli`).
-5. Build, sign and verify (per platform, below).
-6. The annotated tag's message becomes the release notes.
-7. `apps publish --platform <platform>`, with `APPS_TOKEN` and `SPARKLE_PRIVATE_KEY` from
-   secrets.
-8. Check that the platform's live feed offers the new version.
+5. The job skips the rest if `scripts/common/published.sh` finds the version live with
+   files for its platform in `/<app>/releases/<version>.json`, for example after a local
+   release or a re-run.
+6. Build the CLI (`npm ci && npm run build` in `$APPS_TOOLING/cli`).
+7. Build, sign and verify (per platform, below).
+8. The annotated tag's message becomes the release notes.
+9. `apps publish --platform <platform>`, with `APPS_TOKEN` and `SPARKLE_PRIVATE_KEY` from
+   the secrets.
+10. Check that the platform's live feed offers the new version.
 
-### `release-mac.yml`
+### macOS (`release-mac.yml`, `actions/release-mac`)
 
 Runs on `[self-hosted, macos-ephemeral]`.
 
@@ -520,10 +582,11 @@ Its build steps:
 Apple's timestamp server sometimes fails, so signing and notarizing are retried up to 3
 times.
 
-### `release-windows.yml`
+### Windows (`release-windows.yml`, `actions/release-windows`)
 
-Takes one more input, `runs-on`: a JSON array of runner labels, default
-`["self-hosted", "windows"]`. Pass `'"windows-latest"'` to use GitHub's hosted runner.
+`release-windows.yml` takes one more input, `runs-on`: a JSON array of runner labels,
+default `["self-hosted", "windows"]`. Pass `'"windows-latest"'` to use GitHub's hosted
+runner. With the action, the caller's job sets `runs-on` itself.
 
 The `[self-hosted, windows]` pool runs on the Windows machine at home: each job gets a
 fresh Windows 11 x64 Hyper-V VM, deleted afterwards, which can't reach the LAN. Its

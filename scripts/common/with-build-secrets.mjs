@@ -1,12 +1,12 @@
 // Runs a release build with the app's build secrets added to its environment.
-// release-mac.yml and release-windows.yml call it when the caller passes the
-// build-secrets input (see DESIGN.md):
+// actions/release-mac and actions/release-windows call it when the caller passes
+// the build-secrets input (see DESIGN.md):
 //
 //   node scripts/common/with-build-secrets.mjs <command> [args...]
 //
 // Env: APPS_BUILD_SECRETS, the secret names from the input, separated by
 // spaces, commas or newlines; APPS_SECRETS_JSON, the workflow's
-// toJSON(secrets). The command gets each listed secret as an environment
+// secrets as JSON. The command gets each listed secret as an environment
 // variable of the same name, and gets neither of those two variables, so the
 // build never sees the other secrets. Secret values are never printed.
 import { spawn } from 'node:child_process';
@@ -45,7 +45,7 @@ for (const name of names) {
   } else {
     const value = lookup(secrets, name);
     if (typeof value !== 'string' || value === '') {
-      problems.push(`${name} isn't set: add it to the repo's production environment (or as a repo secret) and call the workflow with secrets: inherit`);
+      problems.push(`${name} isn't set: add it to the repo's production environment and pass the secrets in (secrets: inherit to the reusable workflow, or the secrets input of the action)`);
     } else {
       added[name] = value;
     }

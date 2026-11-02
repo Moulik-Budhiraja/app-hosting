@@ -12,6 +12,9 @@ Windows: native apps (Sparkle on macOS, WinSparkle on Windows) or Electron
   workflows, one per platform. The Mac one builds, signs, notarizes and publishes on the
   self-hosted `macos-ephemeral` runner. The Windows one builds, signs with Azure
   Artifact Signing and publishes on a Windows runner.
+- `actions/release-mac` and `actions/release-windows` hold the steps those workflows run.
+  Repos owned by another account, such as Proletic, call these actions from their own
+  jobs, because `secrets: inherit` doesn't pass secrets to another owner's workflow.
 - `scripts/common/` reads `apps.json` and checks tags for both workflows.
   `scripts/mac/` holds the signing, notarizing, DMG and verification scripts, and
   `scripts/windows/` the build and signing scripts for Windows.

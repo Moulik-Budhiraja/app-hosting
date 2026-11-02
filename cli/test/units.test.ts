@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { defaultBuildSection, expandPath, feedName, platformsOf, validateAppFile } from "../src/appfile.js";
 import { feedVersion } from "../src/commands/manage.js";
 import { publishPlatform } from "../src/commands/publish.js";
-import { integrationLines, parsePlatforms, workflowTemplate } from "../src/commands/setup.js";
+import { integrationLines, parsePlatforms, workflowForm, workflowTemplate } from "../src/commands/setup.js";
 import { loadConfig, normalizeUrl, saveConfig } from "../src/config.js";
 import { generateSparkleKeys, publicKeyFor, readPrivateKey, signArchive, verifyArchive } from "../src/sparkle.js";
 import { compareVersions, defaultBuild, parseVersion } from "../src/version.js";
@@ -137,6 +137,23 @@ test("feeds, platforms and the release workflow template", () => {
   assert.match(both, /  mac:\n    uses: Moulik-Budhiraja\/app-hosting\/\.github\/workflows\/release-mac\.yml@main\n    secrets: inherit\n/);
   assert.match(both, /  windows:\n    uses: Moulik-Budhiraja\/app-hosting\/\.github\/workflows\/release-windows\.yml@main\n    secrets: inherit\n/);
   assert.doesNotMatch(workflowTemplate("v", ["windows"]), /release-mac/);
+});
+
+test("repos outside Moulik-Budhiraja get the composite-action workflow", () => {
+  assert.equal(workflowForm("Moulik-Budhiraja/screen-draw"), "reusable");
+  assert.equal(workflowForm("moulik-budhiraja/screen-draw"), "reusable");
+  assert.equal(workflowForm("Proletic/proactive-agent"), "action");
+  assert.equal(workflowForm("someone/app"), "action");
+
+  const both = workflowTemplate("win-v", ["mac", "windows"], "action");
+  assert.match(both, /tags: \['win-v\*'\]/);
+  assert.match(both, /permissions:\n  contents: read\n/);
+  for (const [platform, runner] of [["mac", "\\[self-hosted, macos-ephemeral\\]"], ["windows", "\\[self-hosted, windows\\]"]]) {
+    assert.match(both, new RegExp(`  ${platform}:\\n    runs-on: ${runner}\\n    environment: production\\n    timeout-minutes: 90\\n`));
+    assert.match(both, new RegExp(`group: release-${platform}-\\$\\{\\{ github\\.repository \\}\\}`));
+    assert.match(both, new RegExp(`uses: Moulik-Budhiraja/app-hosting/actions/release-${platform}@main\\n        with:\\n          secrets: \\$\\{\\{ toJSON\\(secrets\\) \\}\\}`));
+  }
+  assert.doesNotMatch(both, /^ +secrets: inherit$|uses: .*\.github\/workflows/m);
 });
 
 test("Sparkle keys: 32-byte seed, raw public key, sign and verify", () => {

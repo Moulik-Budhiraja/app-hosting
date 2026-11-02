@@ -27,18 +27,59 @@ import { SPARKLE_SERVICE, sparkleAccount } from "../secrets.js";
 export const ENVIRONMENT = "production";
 export const WORKFLOW_PATH = ".github/workflows/release.yml";
 
-/** The app repo's release.yml: one job per platform, each calling that platform's reusable workflow. */
-export function workflowTemplate(tagPrefix: string, platforms: readonly Platform[] = ["mac"]): string {
-  const jobs = platforms.map((platform) => `  ${platform}:
-    uses: Moulik-Budhiraja/app-hosting/.github/workflows/release-${platform}.yml@main
+/** The account that owns app-hosting and its reusable workflows. */
+export const TOOLING_OWNER = "Moulik-Budhiraja";
+
+/**
+ * How an app repo calls the release steps. GitHub's `secrets: inherit` only
+ * reaches a reusable workflow owned by the same account or organization, so
+ * repos owned by anyone else call the composite actions from their own jobs.
+ */
+export type WorkflowForm = "reusable" | "action";
+
+export function workflowForm(repo: string): WorkflowForm {
+  return repo.split("/")[0]!.toLowerCase() === TOOLING_OWNER.toLowerCase() ? "reusable" : "action";
+}
+
+const RUNNERS: Record<Platform, string> = { mac: "[self-hosted, macos-ephemeral]", windows: "[self-hosted, windows]" };
+
+/** The app repo's release.yml: one job per platform. */
+export function workflowTemplate(tagPrefix: string, platforms: readonly Platform[] = ["mac"], form: WorkflowForm = "reusable"): string {
+  if (form === "reusable") {
+    const jobs = platforms.map((platform) => `  ${platform}:
+    uses: ${TOOLING_OWNER}/app-hosting/.github/workflows/release-${platform}.yml@main
     secrets: inherit
 `);
-  return `name: Release
+    return `name: Release
 on:
   push:
     tags: ['${tagPrefix}*']
 jobs:
 ${jobs.join("")}`;
+  }
+  const jobs = platforms.map((platform) => `  ${platform}:
+    runs-on: ${RUNNERS[platform]}
+    environment: production
+    timeout-minutes: 90
+    concurrency:
+      group: release-${platform}-\${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: ${TOOLING_OWNER}/app-hosting/actions/release-${platform}@main
+        with:
+          secrets: \${{ toJSON(secrets) }}
+`);
+  return `# This repo isn't owned by ${TOOLING_OWNER}, so it runs the release actions in
+# its own jobs: secrets: inherit doesn't reach another owner's reusable workflow.
+# The secrets come from this repo's production environment.
+name: Release
+on:
+  push:
+    tags: ['${tagPrefix}*']
+permissions:
+  contents: read
+jobs:
+${jobs.join("\n")}`;
 }
 
 export function feedUrl(file: Pick<AppFile, "app" | "remote" | "updater">, platform: Platform = "mac"): string {
@@ -358,6 +399,7 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
   const label = `github-actions ${repo}`;
   const workflowPath = join(options.dir, WORKFLOW_PATH);
   const writeWorkflow = !(await exists(workflowPath));
+  const form = workflowForm(repo);
   const secretNames = [
     ...(signing ? ["APPLE_CERTIFICATE_BASE64", "APPLE_CERTIFICATE_PASSWORD", "APPLE_API_KEY_BASE64", "APPLE_KEY_ID", "APPLE_ISSUER_ID"] : []),
     ...(azure ? Object.keys(azure.secrets) : []),
@@ -376,7 +418,7 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
     appleKeyId: signing?.keyId ?? null,
     azureSigning: azure?.path ?? null,
     publishTokenLabel: label,
-    workflow: { path: workflowPath, write: writeWorkflow },
+    workflow: { path: workflowPath, write: writeWorkflow, form },
     feed: feedUrl(file, platforms[0]),
     feeds: feedUrls(file),
     sparklePublicKey: publicKey ?? null,
@@ -391,7 +433,9 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
         `  • set environment secrets: ${secretNames.join(", ")}`,
         ...(signing ? [`    (Apple files from ${signing.dir}, key ${signing.keyId}${issuer ? "" : "; would ask for the issuer ID"})`] : []),
         ...(azure ? [`    (Artifact Signing settings from ${azure.path})`] : []),
-        writeWorkflow ? `  • write ${WORKFLOW_PATH}` : `  • keep the existing ${WORKFLOW_PATH}`,
+        writeWorkflow
+          ? `  • write ${WORKFLOW_PATH}, ${form === "reusable" ? "calling the reusable workflows" : `running the release actions in its own jobs (${repo.split("/")[0]} isn't ${TOOLING_OWNER})`}`
+          : `  • keep the existing ${WORKFLOW_PATH}`,
         ...(isPublic ? [`  • require approval for workflows from every external contributor's fork pull request`] : []),
         ...(isPublic ? ["", ...publicRepoLines(repo, platforms)] : []),
         "",
@@ -471,7 +515,7 @@ export async function initCommand(deps: Deps, out: Out, options: InitOptions): P
 
   if (writeWorkflow) {
     await mkdir(join(options.dir, ".github", "workflows"), { recursive: true });
-    await writeFile(workflowPath, workflowTemplate(file.tagPrefix, platforms), { flag: "wx" });
+    await writeFile(workflowPath, workflowTemplate(file.tagPrefix, platforms, form), { flag: "wx" });
   }
 
   out.result(

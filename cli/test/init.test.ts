@@ -250,8 +250,11 @@ test("init for a Windows-only app needs no Apple files or issuer", async () => {
     assert.doesNotMatch(result.stdout, /publicRepositories/);
     assert.match(result.stdout, /Windows runner controller.s public-repo allowlist/);
     const workflow = await readFile(join(h.dir, ".github/workflows/release.yml"), "utf8");
-    assert.equal(workflow, workflowTemplate("v", ["windows"]));
-    assert.doesNotMatch(workflow, /release-mac/);
+    // me/win isn't owned by Moulik-Budhiraja, so its jobs run the release action themselves.
+    assert.equal(workflow, workflowTemplate("v", ["windows"], "action"));
+    assert.match(workflow, /runs-on: \[self-hosted, windows\]\n    environment: production\n/);
+    assert.match(workflow, /uses: Moulik-Budhiraja\/app-hosting\/actions\/release-windows@main\n        with:\n          secrets: \$\{\{ toJSON\(secrets\) \}\}\n/);
+    assert.doesNotMatch(workflow, /^ +secrets: inherit$|release-mac/m);
     assert.ok(server.tokens.some((item) => item.app === name));
   } finally {
     await h.cleanup();

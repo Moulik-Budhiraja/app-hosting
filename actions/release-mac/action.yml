@@ -1,0 +1,234 @@
+# Builds, signs, notarizes and publishes the macOS build of an app from a release
+# tag. It runs inside the caller's own job, so that job declares runs-on and
+# environment: production, and its secrets (environment secrets included) come
+# from the caller repo. Apps owned by another account than Moulik-Budhiraja
+# must use this form: GitHub's `secrets: inherit` doesn't reach a reusable
+# workflow across owners. A caller job:
+#
+#   mac:
+#     runs-on: [self-hosted, macos-ephemeral]
+#     environment: production
+#     timeout-minutes: 90
+#     concurrency:
+#       group: release-mac-${{ github.repository }}
+#       cancel-in-progress: false
+#     steps:
+#       - uses: Moulik-Budhiraja/app-hosting/actions/release-mac@main
+#         with:
+#           secrets: ${{ toJSON(secrets) }}
+#
+# release-mac.yml wraps this action for apps under Moulik-Budhiraja. See DESIGN.md.
+name: Release Mac app
+description: Build, sign, notarize and publish an app's macOS release from a release tag.
+
+inputs:
+  secrets:
+    description: >-
+      The job's secrets as JSON (toJSON of the secrets context). The action reads
+      APPS_TOKEN, SPARKLE_PRIVATE_KEY, the APPLE_* signing secrets and the names
+      in build-secrets from it, and nothing else.
+    required: true
+  directory:
+    description: Folder holding apps.json, relative to the repo root.
+    default: .
+  build-secrets:
+    description: >-
+      Names of extra secrets the build command needs, separated by spaces, commas
+      or newlines, such as GOOGLE_OAUTH_CLIENT_BASE64. Each one reaches the build
+      step as an environment variable of the same name. The run fails if one
+      isn't set.
+    default: ''
+  checkout:
+    description: >-
+      Check out the calling repo first. release-mac.yml checks it out itself
+      and passes false.
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Check out the app
+      if: inputs.checkout == 'true'
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Copy the release tooling
+      shell: bash
+      run: |
+        # The scripts and CLI come with the action, at the ref it was called at.
+        dest="$RUNNER_TEMP/apps-tooling"
+        rm -rf "$dest"
+        mkdir -p "$dest"
+        cp -R "$GITHUB_ACTION_PATH/../../scripts" "$GITHUB_ACTION_PATH/../../cli" "$dest/"
+        echo "APPS_TOOLING=$dest" >> "$GITHUB_ENV"
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+
+    - name: Read apps.json
+      id: config
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      run: |
+        "$APPS_TOOLING/scripts/common/read-config.sh" apps.json mac | tee -a "$GITHUB_OUTPUT"
+
+    - name: Check the secrets
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        APPS_TOKEN: ${{ fromJSON(inputs.secrets || '{}').APPS_TOKEN }}
+      run: |
+        if [[ -z $APPS_TOKEN ]]; then
+          echo "::error::APPS_TOKEN didn't reach the release job. The job needs environment: production, the action needs the secrets input set to the toJSON of the secrets context, and apps init sets the secrets."
+          exit 1
+        fi
+
+    - name: Check the tag
+      id: tag
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        REF_TYPE: ${{ github.ref_type }}
+        TAG: ${{ github.ref_name }}
+        PREFIX: ${{ steps.config.outputs.tag_prefix }}
+      run: |
+        [[ $REF_TYPE == tag ]] || { echo "Releases run from tags like ${PREFIX}1.2.3 pushed on main" >&2; exit 1; }
+        "$APPS_TOOLING/scripts/common/check-tag.sh" "$TAG" "$PREFIX" | tee -a "$GITHUB_OUTPUT"
+
+    - name: Skip if already published
+      id: existing
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        REMOTE_URL: ${{ steps.config.outputs.remote_url }}
+        APP: ${{ steps.config.outputs.app }}
+        VERSION: ${{ steps.tag.outputs.version }}
+      run: |
+        # A local release (release-local.sh) or an earlier attempt may have
+        # published this version for macOS already; the server would refuse
+        # it again. Windows files in the same release don't count.
+        published=$("$APPS_TOOLING/scripts/common/published.sh" "$REMOTE_URL" "$APP" "$VERSION" mac)
+        echo "published=$published" >> "$GITHUB_OUTPUT"
+        if [[ $published == true ]]; then
+          echo "::notice::$APP $VERSION is already published for macOS on $REMOTE_URL; nothing to do."
+        fi
+
+    - name: Build the apps CLI
+      if: steps.existing.outputs.published != 'true'
+      shell: bash
+      run: |
+        cd "$APPS_TOOLING/cli"
+        npm ci --no-audit --no-fund
+        npm run build
+
+    - name: Set up the signing keychain
+      if: steps.existing.outputs.published != 'true'
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        APPLE_CERTIFICATE_BASE64: ${{ fromJSON(inputs.secrets || '{}').APPLE_CERTIFICATE_BASE64 }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ fromJSON(inputs.secrets || '{}').APPLE_CERTIFICATE_PASSWORD }}
+        APPLE_API_KEY_BASE64: ${{ fromJSON(inputs.secrets || '{}').APPLE_API_KEY_BASE64 }}
+      run: |
+        "$APPS_TOOLING/scripts/mac/keychain.sh" create > /dev/null
+
+    - name: Build, sign and notarize
+      id: build
+      if: steps.existing.outputs.published != 'true'
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        VERSION: ${{ steps.tag.outputs.version }}
+        BUILD: ${{ steps.tag.outputs.build }}
+        APPLE_KEY_ID: ${{ fromJSON(inputs.secrets || '{}').APPLE_KEY_ID }}
+        APPLE_ISSUER_ID: ${{ fromJSON(inputs.secrets || '{}').APPLE_ISSUER_ID }}
+        # Only when the caller asks for build secrets. The wrapper hands the
+        # build just the named ones and drops these two variables.
+        APPS_BUILD_SECRETS: ${{ inputs.build-secrets }}
+        APPS_SECRETS_JSON: ${{ inputs.build-secrets != '' && inputs.secrets || '' }}
+      run: |
+        if [[ -n $APPS_BUILD_SECRETS ]]; then
+          node "$APPS_TOOLING/scripts/common/with-build-secrets.mjs" "$APPS_TOOLING/scripts/mac/build-release.sh" apps.json | tee -a "$GITHUB_OUTPUT"
+        else
+          "$APPS_TOOLING/scripts/mac/build-release.sh" apps.json | tee -a "$GITHUB_OUTPUT"
+        fi
+
+    - name: Release notes
+      id: notes
+      if: steps.existing.outputs.published != 'true'
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        TAG: ${{ github.ref_name }}
+      run: |
+        # An annotated tag's message becomes the release notes. actions/checkout
+        # fetches the pushed tag as a lightweight tag, so fetch the tag object.
+        git fetch --quiet --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+        file="$RUNNER_TEMP/release-notes.md"
+        if [[ $(git cat-file -t "refs/tags/$TAG") == tag ]]; then
+          git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG" | sed -e '/^-----BEGIN PGP SIGNATURE-----/,$d' > "$file"
+        fi
+        if [[ -s $file ]] && grep -q '[^[:space:]]' "$file"; then
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Publish
+      if: steps.existing.outputs.published != 'true'
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        APPS_TOKEN: ${{ fromJSON(inputs.secrets || '{}').APPS_TOKEN }}
+        SPARKLE_PRIVATE_KEY: ${{ fromJSON(inputs.secrets || '{}').SPARKLE_PRIVATE_KEY }}
+        VERSION: ${{ steps.tag.outputs.version }}
+        BUILD: ${{ steps.tag.outputs.build }}
+        DMG: ${{ steps.build.outputs.dmg }}
+        ZIP: ${{ steps.build.outputs.zip }}
+        BLOCKMAP: ${{ steps.build.outputs.blockmap }}
+        MINIMUM_SYSTEM_VERSION: ${{ steps.build.outputs.minimum_system_version }}
+        ICON: ${{ steps.build.outputs.icon }}
+        NOTES_FILE: ${{ steps.notes.outputs.file }}
+      run: |
+        args=(publish --platform mac --version "$VERSION" --build "$BUILD" --dmg "$DMG")
+        [[ -n $ZIP ]] && args+=(--zip "$ZIP")
+        [[ -n $BLOCKMAP ]] && args+=(--blockmap "$BLOCKMAP")
+        [[ -n $MINIMUM_SYSTEM_VERSION ]] && args+=(--minimum-system-version "$MINIMUM_SYSTEM_VERSION")
+        [[ -n $ICON ]] && args+=(--icon "$ICON")
+        [[ -n $NOTES_FILE ]] && args+=(--notes-file "$NOTES_FILE")
+        node "$APPS_TOOLING/cli/dist/index.js" "${args[@]}"
+
+    - name: Check the live feed
+      if: steps.existing.outputs.published != 'true'
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      env:
+        REMOTE_URL: ${{ steps.config.outputs.remote_url }}
+        APP: ${{ steps.config.outputs.app }}
+        UPDATER: ${{ steps.config.outputs.updater }}
+        VERSION: ${{ steps.tag.outputs.version }}
+      run: |
+        if [[ $UPDATER == sparkle ]]; then
+          feed="$REMOTE_URL/$APP/appcast.xml"
+          pattern="<sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>"
+        else
+          feed="$REMOTE_URL/$APP/latest-mac.yml"
+          pattern="version: \"$VERSION\""
+        fi
+        for _ in $(seq 1 10); do
+          if curl --fail --silent --show-error --max-time 15 "$feed" | grep -qF "$pattern"; then
+            echo "$feed offers $VERSION"
+            exit 0
+          fi
+          sleep 3
+        done
+        echo "$feed doesn't offer $VERSION" >&2
+        exit 1
+
+    - name: Remove the signing keychain
+      if: always()
+      shell: bash
+      run: |
+        if [[ -n ${APPS_SECRET_DIR:-} ]]; then
+          "$APPS_TOOLING/scripts/mac/keychain.sh" delete
+        fi
