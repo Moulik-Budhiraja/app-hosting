@@ -57,14 +57,17 @@ function cdata(text: string): string {
   return `<![CDATA[${text.replaceAll(']]>', ']]]]><![CDATA[>')}]]>`;
 }
 
+/** How many releases an appcast lists per platform. Sparkle only needs the newest one it can install. */
+export const APPCAST_LIMIT = 10;
+
 /**
- * A Sparkle appcast with every live release for one platform, newest first:
+ * A Sparkle appcast with the newest APPCAST_LIMIT live releases for one platform, newest first:
  * appcast.xml for Sparkle on macOS, appcast-windows.xml for WinSparkle.
  * WinSparkle compares sparkle:version with the app's own X.Y.Z, so it gets the version, not the build.
  */
 export function sparkleAppcast(app: AppRecord, releases: Release[], publicUrl: string, platform: Platform = 'mac'): string {
   const base = `${publicUrl}/${app.name}/`;
-  const items = platformReleases(releases, platform).map((release) => {
+  const items = platformReleases(releases, platform).slice(0, APPCAST_LIMIT).map((release) => {
     const file = downloadFile(release, platform);
     if (!file) return '';
     const info = release.platforms[platform];

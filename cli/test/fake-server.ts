@@ -21,6 +21,10 @@ export interface FakeServer {
   apps: Map<string, StoredApp>;
   tokens: { id: string; token: string; app: string; label: string; createdAt: string }[];
   requests: string[];
+  /** Largest page releases.json returns, like the server's 100. */
+  releasesPageMax: number;
+  /** Answer releases.json with the whole list as an array, like servers from before paging. */
+  legacyReleasesJson: boolean;
   close(): Promise<void>;
 }
 
@@ -55,6 +59,7 @@ export async function startFakeServer(): Promise<FakeServer> {
   const tokens: FakeServer["tokens"] = [];
   const uploads = new Map<string, Upload>();
   const requests: string[] = [];
+  const fake = { releasesPageMax: 100, legacyReleasesJson: false } as FakeServer;
 
   const send = (res: ServerResponse, status: number, body?: unknown, type = "application/json") => {
     res.statusCode = status;
@@ -91,7 +96,17 @@ export async function startFakeServer(): Promise<FakeServer> {
       const live = (platform: Platform) => [...app.releases]
         .filter((release) => !release.withdrawn && release.files.some((file) => file.platform === platform))
         .sort((a, b) => b.build - a.build);
-      if (parts[1] === "releases.json") return send(res, 200, app.releases.filter((release) => !release.withdrawn).map(publicRelease));
+      if (parts[1] === "releases.json") {
+        const live = app.releases.filter((release) => !release.withdrawn).sort((a, b) => b.build - a.build).map(publicRelease);
+        if (fake.legacyReleasesJson) return send(res, 200, live);
+        const limit = Math.min(Number(url.searchParams.get("limit") ?? 20), fake.releasesPageMax);
+        const beforeVersion = url.searchParams.get("before");
+        const rest = beforeVersion ? live.filter((release) => newer(beforeVersion, release.version)) : live;
+        const page = rest.slice(0, limit);
+        // On another host, the way a server behind a proxy names its public address.
+        const next = rest.length > limit ? `https://public.example.test/${app.name}/releases.json?limit=${limit}&before=${page.at(-1)!.version}` : null;
+        return send(res, 200, { releases: page, next });
+      }
       const appcasts: Record<string, Platform> = { "appcast.xml": "mac", "appcast-windows.xml": "windows" };
       if (appcasts[parts[1] ?? ""] && app.updater === "sparkle") {
         const platform = appcasts[parts[1]!]!;
@@ -259,12 +274,13 @@ export async function startFakeServer(): Promise<FakeServer> {
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
-  return {
+  Object.assign(fake, {
     url: `http://127.0.0.1:${port}`,
     adminToken,
     apps,
     tokens,
     requests,
     close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }),
-  };
+  });
+  return fake;
 }

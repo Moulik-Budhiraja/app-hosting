@@ -66,7 +66,7 @@ describe('macOS and Windows releases', () => {
     assert.ok(xml.includes(`sparkle:edSignature="${old.edSignature}"`));
     assert.match(xml, /<pubDate>Fri, 02 Jan 2026 03:04:05 GMT<\/pubDate>/);
 
-    const list = await json(await fetch(`${h.base}/legacy/releases.json`));
+    const list = (await json(await fetch(`${h.base}/legacy/releases.json`))).releases;
     assert.deepEqual(list[0].platforms, { mac: { publishedAt: old.publishedAt, minimumSystemVersion: '13.0' } });
     assert.equal(list[0].minimumSystemVersion, '13.0');
     assert.equal(list[0].files[0].platform, 'mac');
@@ -244,7 +244,7 @@ describe('macOS and Windows releases', () => {
   });
 
   test('releases.json lists every platform', async () => {
-    const list = await json(await fetch(`${h.base}/native/releases.json`));
+    const list = (await json(await fetch(`${h.base}/native/releases.json`))).releases;
     const latest = list[0];
     assert.equal(latest.version, '2.0.0');
     assert.deepEqual(Object.keys(latest.platforms).sort(), ['mac', 'windows']);

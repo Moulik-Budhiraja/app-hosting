@@ -283,6 +283,39 @@ test("releases without apps.json, by --app and --remote, falls back to public da
   }
 });
 
+test("releases pages through the public releases.json, and reads the old array too", async () => {
+  const h = await harness();
+  const versions = ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"];
+  server.apps.set("paged", {
+    name: "paged", title: "Paged", updater: "electron", createdAt: new Date().toISOString(),
+    releases: versions.map((version, i) => ({
+      version, build: 100 + i, publishedAt: new Date(2026, 0, i + 1).toISOString(), withdrawn: version === "1.2.0",
+      platforms: { mac: { publishedAt: new Date(2026, 0, i + 1).toISOString() } },
+      files: [{ name: `Paged-${version}.zip`, platform: "mac", role: "zip", size: 1, sha256: "0" }],
+    })),
+  } as never);
+  try {
+    await h.run("remote", "add", "moulik", server.url);
+    server.releasesPageMax = 2;
+    const before = server.requests.length;
+    const result = await h.run("releases", "--app", "paged", "--remote", "moulik", "--json");
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout).releases.map((r: { version: string }) => r.version), ["1.4.0", "1.3.0", "1.1.0", "1.0.0"]);
+    const pages = server.requests.slice(before).filter((line) => line.startsWith("GET /paged/releases.json"));
+    assert.equal(pages.length, 2);
+
+    server.legacyReleasesJson = true;
+    const legacy = await h.run("releases", "--app", "paged", "--remote", "moulik", "--json");
+    assert.equal(legacy.code, 0, legacy.stderr);
+    assert.equal(JSON.parse(legacy.stdout).releases.length, 4);
+  } finally {
+    server.releasesPageMax = 100;
+    server.legacyReleasesJson = false;
+    server.apps.delete("paged");
+    await h.cleanup();
+  }
+});
+
 test("build-number, help and unknown commands", async () => {
   const h = await harness();
   try {

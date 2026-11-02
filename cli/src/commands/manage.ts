@@ -29,9 +29,30 @@ async function loadReleases(api: ApiClient, app: string): Promise<{ releases: Re
     const info = await api.getApp(app);
     return { releases: releasesOf(info), updater: info.updater, source: "api" };
   }
-  const text = await api.publicText(`/${encodeURIComponent(app)}/releases.json`);
-  if (text === null) throw new CliError(`${app} doesn't exist on ${api.remoteName}.`, EXIT.failure, "NOT_FOUND");
-  return { releases: releasesOf(JSON.parse(text)), source: "public" };
+  return { releases: await publicReleases(api, app), source: "public" };
+}
+
+/**
+ * Every live release from the public releases.json, following its `next` links.
+ * Servers from before paging answer with the whole list as an array.
+ */
+export async function publicReleases(api: ApiClient, app: string): Promise<Release[]> {
+  const releases: Release[] = [];
+  let path: string | null = `/${encodeURIComponent(app)}/releases.json?limit=100`;
+  for (let page = 0; path !== null; page += 1) {
+    if (page >= 1000) throw new CliError(`${app}'s releases.json on ${api.remoteName} keeps returning more pages.`, EXIT.failure);
+    const text = await api.publicText(path);
+    if (text === null) {
+      if (page === 0) throw new CliError(`${app} doesn't exist on ${api.remoteName}.`, EXIT.failure, "NOT_FOUND");
+      throw new CliError(`${api.url(path)} went missing while paging.`, EXIT.failure);
+    }
+    const body = JSON.parse(text) as unknown;
+    releases.push(...releasesOf(body));
+    const next = Array.isArray(body) ? null : (body as { next?: unknown })?.next;
+    // `next` is an absolute URL on the server's public address. Ask the same remote for it.
+    path = typeof next === "string" && next ? (({ pathname, search }) => pathname + search)(new URL(next)) : null;
+  }
+  return releases;
 }
 
 function sortNewestFirst(releases: Release[]): Release[] {

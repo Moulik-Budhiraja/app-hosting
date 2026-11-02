@@ -185,25 +185,42 @@ and the download page work per platform from these.
 
 ### Public routes
 
+Everything outside `/api` is public and read-only. These are all of it:
+
 | Route | What |
 | --- | --- |
 | `GET /healthz` | `{"ok":true,"remote":"moulik"}` |
 | `GET /` | HTML list of apps: icon, title, newest live version on any platform |
 | `GET /<app>/` | HTML download page for one platform, see below |
+| `GET /<app>/app.json` | the app's public metadata, see below |
+| `GET /<app>/latest.json` | `{"mac": <release> \| null, "windows": <release> \| null}`: each platform's latest release |
+| `GET /<app>/latest.json?platform=mac\|windows` | that platform's latest release; 404 if it has none, 400 for another platform |
+| `GET /<app>/releases.json` | one page of live releases, newest first: `{"releases": [...], "next": <url> \| null}`, see below |
+| `GET /<app>/releases/<version>.json` | one live release; 404 if it doesn't exist or is withdrawn |
+| `GET /<app>/releases/<version>/<file>` | artifact, with `Content-Length`, `ETag` and Range support |
 | `GET /<app>/icon.png` | the app's icon. Pages link to `icon.png?v=<first 12 hex of its sha256>`, which is cached for good; without a matching `v` it's `no-cache` |
 | `GET /<app>/download` | 302 to the visitor's platform's download, see below |
 | `GET /<app>/download/mac` | 302 to the latest macOS DMG |
 | `GET /<app>/download/windows` | 302 to the latest Windows installer |
-| `GET /<app>/appcast.xml` | Sparkle feed for macOS (sparkle apps only), newest first |
-| `GET /<app>/appcast-windows.xml` | WinSparkle feed for Windows (sparkle apps only), newest first |
+| `GET /<app>/appcast.xml` | Sparkle feed for macOS (sparkle apps only): the newest 10 live releases |
+| `GET /<app>/appcast-windows.xml` | WinSparkle feed for Windows (sparkle apps only): the newest 10 live releases |
 | `GET /<app>/latest-mac.yml` | electron-updater feed for macOS (electron apps only) |
 | `GET /<app>/latest.yml` | electron-updater feed for Windows (electron apps only) |
-| `GET /<app>/releases/<version>/<file>` | artifact, with `Content-Length`, `ETag` and Range support |
-| `GET /<app>/releases.json` | public JSON **array** of live releases (withdrawn ones are left out), see below |
 
-Withdrawn releases leave the feeds, the download pages and the download routes, but
-their files still serve. Unknown app or path returns 404, and so does a download route or
-feed with nothing to offer.
+Every route takes `HEAD` too. Withdrawn releases leave the feeds, the JSON routes, the
+download pages and the download routes, but their files still serve. Unknown app or path
+returns 404, and so does a download route or feed with nothing to offer. Errors are
+`{"error":{"code","message"}}`. The JSON routes send `Cache-Control: no-cache`.
+
+**CORS.** Any website may read the public routes. `GET` and `HEAD` responses on them,
+errors and redirects included, carry `Access-Control-Allow-Origin: *` and
+`Access-Control-Expose-Headers: Link, ETag, Content-Range, Accept-Ranges`. `OPTIONS` on
+a public path answers 204 with `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`,
+echoes `Access-Control-Request-Headers` as `Access-Control-Allow-Headers`, and never
+allows credentials. `POST`, `PUT`, `PATCH` and `DELETE` on a public path answer 405
+without CORS headers, whatever token comes with them. `/api` has no CORS at all: every
+request there, `OPTIONS` included, needs a token and gets 401 without one, so a browser
+on another site can't call it.
 
 **The visitor's platform** comes from the User-Agent: `Windows` means `windows`, and
 `Macintosh`, `Mac OS X` or `Darwin` means `mac`. `/download` sends a known platform to
@@ -212,9 +229,25 @@ User-Agent (curl, Linux, bots) gets macOS when the app has a macOS release, and 
 otherwise, so `curl -L .../download` keeps returning the DMG. Responses that depend on
 the User-Agent send `Vary: User-Agent` and `Cache-Control: no-cache`.
 
-`releases.json` entries: `version`, `build`, `publishedAt`, `notes`, `platforms`, and
-`files` (`name`, `platform`, `role`, `size`, `url`). They also keep a top-level
-`minimumSystemVersion`, the macOS one or null, for older readers.
+**A release** in `latest.json`, `releases.json` and `releases/<version>.json` has
+`version`, `build`, `publishedAt`, `notes`, `platforms`, and `files` (`name`,
+`platform`, `role`, `size`, `url`). It also keeps a top-level `minimumSystemVersion`,
+the macOS one or null, for older readers. It lists the files of every platform, also in
+`latest.json?platform=`.
+
+**`releases.json` pages.** `?limit=N` sets the page size, 1 to 100, default 20.
+`?before=<version>` starts the page after that version, which need not exist. `next`
+is the absolute URL of the following page, or null on the last one, and the same URL
+comes as `Link: <url>; rel="next"`. Follow `next` until it's null to read every
+release. Bad `limit` or `before` values answer 400. Before paging (until November 2026)
+the body was a plain array of every live release; `apps releases` and `published.sh`
+still read that form from an older server.
+
+**`app.json`:** `name`, `title`, `updater`, `platforms` (those with a live release),
+`icon` (the versioned `icon.png` URL, or null), and `urls`: `page`, `download`,
+`downloads` and `feeds` keyed by platform (only platforms with a live release),
+`latest` and `releases`. It leaves out what only the admin API shows, such as the
+Sparkle public key and publish tokens.
 
 ### Download page
 
@@ -234,7 +267,8 @@ button ("Also for Windows" or "Also for Mac") goes to `?platform=<other>`.
 
 ### Feeds
 
-Sparkle item (`appcast.xml`, one per live macOS release):
+Sparkle item (`appcast.xml`, one per live macOS release, newest 10 only; Sparkle only
+needs the newest one it can install):
 ```xml
 <item>
   <title>1.2.3</title>
@@ -246,7 +280,7 @@ Sparkle item (`appcast.xml`, one per live macOS release):
   <enclosure url="<public>/<app>/releases/1.2.3/<dmg>" length="N" type="application/octet-stream" sparkle:edSignature="..."/>
 </item>
 ```
-WinSparkle item (`appcast-windows.xml`, one per live Windows release). WinSparkle
+WinSparkle item (`appcast-windows.xml`, one per live Windows release, newest 10 only). WinSparkle
 compares `sparkle:version` with the app's own version, so it carries the version, not
 the build:
 ```xml
@@ -371,7 +405,7 @@ Re-running a commit that already succeeded returns 409 `already_published`.
 | `apps init [--repo owner/name] [--signing-dir ~/.config/predictor-release]` | in a repo with `apps.json`: create the GitHub `production` environment, allowed only from `<tagPrefix>*` tags; set the environment secrets (below) for the platforms in `builds`; write `.github/workflows/release.yml` if missing; for a public repo, require approval for workflows from every external contributor's fork pull request and say that the runner must allowlist the repo; print what the app must contain for each platform |
 | `apps publish --version X [--platform mac\|windows] [--build N] [--notes-file f] [--minimum-system-version v] [--icon png]` and the platform's files: `--dmg p [--zip p] [--blockmap p]` for macOS, `--installer p [--blockmap p]` for Windows | read `apps.json`, sign the update file for sparkle, upload with progress, commit, set the icon if given (a failure there only warns), print the release. `--platform` defaults to `windows` when `--installer` is given and to `mac` otherwise |
 | `apps icon <png>` / `apps icon --remove` | set the app's icon, or remove it (admin) |
-| `apps releases [--app a --remote r]` | list releases, with their platforms |
+| `apps releases [--app a --remote r]` | list releases, with their platforms. Logged in it reads the admin API, which includes withdrawn ones; otherwise it follows `releases.json`'s `next` pages |
 | `apps withdraw <version>` / `apps restore <version>` | admin |
 | `apps token create\|list\|revoke` | manage publish tokens for the current app |
 | `apps status [--expect X.Y.Z] [--platform p]` | the current app, its remote, and for each platform in `builds` (or just `--platform`) the latest release and whether the live feed matches. `--json` gives `{..., platforms: [{platform, latest, feed, ok}], ok}`, and the exit code is 1 if any platform is off |
@@ -441,8 +475,9 @@ non-cancelling concurrency group per repo and platform, and share these steps:
 2. `scripts/common/read-config.sh <apps.json> <platform>` reads `apps.json`, and
    `scripts/common/check-tag.sh` checks that the tag is `<tagPrefix>X.Y.Z` and that the
    tagged commit is on `origin/main`.
-3. The job skips itself if `/<app>/releases.json` already lists the version with files
-   for its platform, for example after a local release or a re-run.
+3. The job skips itself if `scripts/common/published.sh` finds the version live with files
+   for its platform in `/<app>/releases/<version>.json`, for example after a local release
+   or a re-run.
 4. Set up Node 24, then build the CLI (`npm ci && npm run build` in `.apps-tooling/cli`).
 5. Build, sign and verify (per platform, below).
 6. The annotated tag's message becomes the release notes.

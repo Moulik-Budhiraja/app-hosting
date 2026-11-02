@@ -36,6 +36,17 @@ hold back the Mac one; re-run it and it joins the release. The remote serves:
 
 Each app lives on exactly one remote. Ask if it's unclear which one.
 
+Websites (a landing page, a changelog) read an app's releases from the remote's public
+JSON, which allows any origin (CORS `*`) and needs no token:
+- `GET <remote>/<app>/app.json`: title, icon URL, page, download and feed URLs, platforms.
+- `GET <remote>/<app>/latest.json`: the latest release per platform, or one with `?platform=mac|windows`.
+- `GET <remote>/<app>/releases/<version>.json`: one release.
+- `GET <remote>/<app>/releases.json?limit=N&before=<version>`: pages newest first.
+  Follow `next` (also in the `Link` header) until it's null.
+
+For a download button, link to `<remote>/<app>/download` (the visitor's platform) or
+`download/mac` / `download/windows`. Never use `/api` or a token from a website.
+
 ## Onboarding an app
 
 1. **Remote and login (once per machine).** Run `apps remote list`. If the remote is

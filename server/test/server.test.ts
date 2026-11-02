@@ -213,7 +213,7 @@ describe('apps server', () => {
     assert.ok(!(await (await fetch(`${h.base}/draw/appcast.xml`)).text()).includes('2.0.0'));
     assert.ok(!(await (await fetch(`${h.base}/draw/`)).text()).includes('Version 2.0.0'));
     assert.equal((await fetch(`${h.base}/draw/releases/2.0.0/b.dmg`)).status, 200, 'withdrawn files still serve');
-    const publicList = await json(await fetch(`${h.base}/draw/releases.json`));
+    const publicList = (await json(await fetch(`${h.base}/draw/releases.json`))).releases;
     assert.deepEqual(publicList.map((r: any) => r.version), ['1.1.0', '1.0.0']);
 
     // A withdrawn version still blocks reuse of its number.
@@ -342,7 +342,7 @@ describe('apps server', () => {
   });
 
   test('path traversal and odd paths are rejected', async () => {
-    for (const route of ['/draw/releases/1.0.0/..%2F..%2Fapp.json', '/draw/releases/..%2F1.0.0/x', '/%2e%2e/tokens.json', '/draw/releases/1.0.0/release.json', '/draw/app.json', '/draw/%00']) {
+    for (const route of ['/draw/releases/1.0.0/..%2F..%2Fapp.json', '/draw/releases/..%2F1.0.0/x', '/%2e%2e/tokens.json', '/draw/releases/1.0.0/release.json', '/draw/%00']) {
       const res = await raw(h, route);
       assert.ok(res.status === 400 || res.status === 404, `${route} → ${res.status}`);
       assert.ok(!res.body.toString().includes('sparklePublicKey'), route);

@@ -15,6 +15,7 @@ import { Store, isAppName } from './store.ts';
 import type { AppRecord, Release } from './store.ts';
 import { PLATFORMS, isPlatform } from './store.ts';
 import { UPLOAD_TTL_MS, cleanupUploads, commitUpload, receiveFile, startUpload } from './uploads.ts';
+import { compareVersions, isVersion } from './versions.ts';
 
 export interface AppServer {
   server: Server;
@@ -71,10 +72,15 @@ async function handle(config: Config, store: Store, req: IncomingMessage, res: S
 
   if (segments[0] === 'api') return api(config, store, req, res, segments.slice(1));
 
+  // Everything outside /api is public and read-only, so any website may read it
+  // with GET or HEAD. Other methods get 405 and no CORS headers.
   const method = req.method ?? 'GET';
+  if (method === 'OPTIONS') return preflight(req, res);
   if (method !== 'GET' && method !== 'HEAD') {
     throw new HttpError(405, 'method_not_allowed', `${method} isn't allowed here`);
   }
+  res.setHeader('access-control-allow-origin', '*');
+  res.setHeader('access-control-expose-headers', CORS_EXPOSED);
   if (segments.length === 1 && segments[0] === 'healthz') {
     return sendJson(res, 200, { ok: true, remote: config.remoteName });
   }
@@ -84,6 +90,70 @@ async function handle(config: Config, store: Store, req: IncomingMessage, res: S
     return sendHtml(res, 200, indexPage(config.remoteName, rows));
   }
   return publicApp(config, store, req, res, segments, url.searchParams);
+}
+
+const CORS_EXPOSED = 'Link, ETag, Content-Range, Accept-Ranges';
+
+/** Answers a CORS preflight for the public routes. */
+function preflight(req: IncomingMessage, res: ServerResponse): void {
+  const requested = req.headers['access-control-request-headers'];
+  res.writeHead(204, {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+    // Echo the request headers the page asks for, such as Range or If-None-Match. Nothing here reads credentials.
+    ...(requested && /^[A-Za-z0-9!#$%&'*+.^_`|~, -]+$/.test(requested) ? { 'access-control-allow-headers': requested } : {}),
+    'access-control-max-age': '86400',
+    'cache-control': 'no-store',
+    vary: 'Access-Control-Request-Headers',
+  });
+  res.end();
+}
+
+/** Default and largest page size of releases.json. */
+export const RELEASES_PAGE = { default: 20, max: 100 };
+
+/** A release as the public JSON routes show it: a releases.json entry. */
+function publicRelease(config: Config, app: AppRecord, release: Release) {
+  const base = `${config.publicUrl}/${app.name}/`;
+  return {
+    version: release.version,
+    build: release.build,
+    publishedAt: release.publishedAt,
+    // The macOS minimum, for readers from before Windows support.
+    minimumSystemVersion: release.platforms.mac?.minimumSystemVersion ?? null,
+    notes: release.notes,
+    platforms: release.platforms,
+    files: release.files.map((file) => ({ name: file.name, platform: file.platform, role: file.role, size: file.size, url: base + releasePath(release, file) })),
+  };
+}
+
+/** The app's public metadata: what its page and feeds already show. */
+function publicAppInfo(config: Config, app: AppRecord, releases: Release[]) {
+  const base = `${config.publicUrl}/${app.name}/`;
+  const platforms = PLATFORMS.filter((platform) => platformReleases(releases, platform).length > 0);
+  return {
+    name: app.name,
+    title: app.title,
+    updater: app.updater,
+    platforms,
+    icon: app.icon ? `${base}icon.png?v=${iconVersion(app)}` : null,
+    urls: {
+      page: base,
+      download: `${base}download`,
+      downloads: Object.fromEntries(platforms.map((platform) => [platform, `${base}download/${platform}`])),
+      feeds: Object.fromEntries(platforms.map((platform) => [platform, base + feedName(app.updater, platform)])),
+      latest: `${base}latest.json`,
+      releases: `${base}releases.json`,
+    },
+  };
+}
+
+function pageSize(query: URLSearchParams): number {
+  const raw = query.get('limit');
+  if (raw === null) return RELEASES_PAGE.default;
+  const limit = /^\d{1,4}$/.test(raw) ? Number(raw) : NaN;
+  if (!(limit >= 1 && limit <= RELEASES_PAGE.max)) throw badRequest('invalid_limit', `limit must be 1 to ${RELEASES_PAGE.max}`);
+  return limit;
 }
 
 async function publicApp(config: Config, store: Store, req: IncomingMessage, res: ServerResponse, segments: string[], query: URLSearchParams): Promise<void> {
@@ -159,23 +229,44 @@ async function publicApp(config: Config, store: Store, req: IncomingMessage, res
     return send(res, 200, yml, { 'content-type': 'text/yaml; charset=utf-8', 'cache-control': 'no-cache' });
   }
 
+  const noCache = { 'cache-control': 'no-cache' };
+
+  if (route === 'app.json') return sendJson(res, 200, publicAppInfo(config, app, releases), noCache);
+
+  if (route === 'latest.json') {
+    const requested = query.get('platform');
+    if (requested !== null) {
+      if (!isPlatform(requested)) throw badRequest('invalid_platform', 'platform must be mac or windows');
+      const latest = platformReleases(releases, requested)[0];
+      if (!latest) throw notFound(`${app.title} has no ${PLATFORM_NAMES[requested]} release yet`);
+      return sendJson(res, 200, publicRelease(config, app, latest), noCache);
+    }
+    return sendJson(res, 200, Object.fromEntries(PLATFORMS.map((platform) => {
+      const latest = platformReleases(releases, platform)[0];
+      return [platform, latest ? publicRelease(config, app, latest) : null];
+    })), noCache);
+  }
+
   if (route === 'releases.json') {
-    const base = `${config.publicUrl}/${app.name}/`;
-    return sendJson(
-      res,
-      200,
-      liveReleases(releases).map((release) => ({
-        version: release.version,
-        build: release.build,
-        publishedAt: release.publishedAt,
-        // The macOS minimum, for readers from before Windows support.
-        minimumSystemVersion: release.platforms.mac?.minimumSystemVersion ?? null,
-        notes: release.notes,
-        platforms: release.platforms,
-        files: release.files.map((file) => ({ name: file.name, platform: file.platform, role: file.role, size: file.size, url: base + releasePath(release, file) })),
-      })),
-      { 'cache-control': 'no-cache' },
-    );
+    const limit = pageSize(query);
+    const before = query.get('before');
+    if (before !== null && !isVersion(before)) throw badRequest('invalid_before', 'before must be a version like 1.2.3');
+    const live = liveReleases(releases).filter((release) => before === null || compareVersions(release.version, before) < 0);
+    const page = live.slice(0, limit);
+    const next = live.length > limit
+      ? `${config.publicUrl}/${app.name}/releases.json?limit=${limit}&before=${page.at(-1)!.version}`
+      : null;
+    return sendJson(res, 200, { releases: page.map((release) => publicRelease(config, app, release)), next }, {
+      ...noCache,
+      ...(next ? { link: `<${next}>; rel="next"` } : {}),
+    });
+  }
+
+  if (rest.length === 2 && rest[0] === 'releases' && rest[1]!.endsWith('.json')) {
+    const version = rest[1]!.slice(0, -'.json'.length);
+    const release = liveReleases(releases).find((candidate) => candidate.version === version);
+    if (!release) throw notFound(`${app.title} has no live release ${version}`);
+    return sendJson(res, 200, publicRelease(config, app, release), noCache);
   }
 
   if (rest.length === 3 && rest[0] === 'releases') {
