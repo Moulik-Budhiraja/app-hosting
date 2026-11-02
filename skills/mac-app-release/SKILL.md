@@ -214,6 +214,13 @@ Monorepo: set `"tagPrefix": "app/v"` and tag `app/v1.2.3`. If `apps.json` isn't 
 repo root, pass `with: { directory: path }` to each job in `release.yml` (to the action's
 step in the composite-action form).
 
+Release notes: the annotated tag's message, by default. If the app keeps its notes
+elsewhere (`CHANGELOG.md`) or pushes lightweight tags, write the notes to a file and
+pass `notes-file: path/from/repo/root.md` to the action or reusable workflow. When the
+file has text it's used; otherwise the tag message is. Write it in the build command,
+or in a step before the action, which then needs its own `actions/checkout` and
+`checkout: false` on the action (checking out deletes untracked files).
+
 Build-time secrets: if `command` needs a secret, such as an OAuth client file the app
 bundles, put it in the repo's `production` environment and pass it on each platform's
 job that needs it:

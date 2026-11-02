@@ -51,6 +51,12 @@ on:
           for GitHub's hosted runner.
         type: string
         default: '["self-hosted", "windows"]'
+      notes-file:
+        description: >-
+          Release notes file, relative to the repo root. When it holds text it's the
+          release notes; otherwise the annotated tag's message is. See the action.
+        type: string
+        default: ''
       build-secrets:
         description: >-
           Names of extra secrets the build command needs, separated by spaces,
@@ -143,3 +149,4 @@ jobs:
           azure-signing-profile: ${{ secrets.AZURE_SIGNING_PROFILE }}
           azure-signing-publisher: ${{ secrets.AZURE_SIGNING_PUBLISHER }}
           build-env: ${{ steps.build-env.outputs.build_env }}
+          notes-file: ${{ inputs.notes-file }}

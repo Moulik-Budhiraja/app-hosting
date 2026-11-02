@@ -489,6 +489,7 @@ its own input (`apps-token: ${{ secrets.APPS_TOKEN }}` and so on). Their inputs:
   (`scripts/common/build-env.mjs from-secrets`) and passes them to the action as
   `build-env`. That step is the only one that sees `toJSON(secrets)`, and it runs only
   when `build-secrets` is set.
+- `notes-file`: passed to the action, see below.
 - `runs-on` (`release-windows.yml` only): see below.
 
 **Other owners: composite actions in the caller's job.** The caller's job declares the
@@ -555,6 +556,13 @@ unless noted:
   `azure-signing-endpoint`, `azure-signing-account`, `azure-signing-profile`,
   `azure-signing-publisher` (the `AZURE_*` secrets).
 - `build-env`: variables for the build command only, see below.
+- `notes-file`: a release notes file, relative to the repo root, for apps whose tags
+  carry no message, such as lightweight tags or notes kept in `CHANGELOG.md`. When it
+  holds text other than whitespace, it's the release notes. Otherwise (unset, missing
+  or blank) the annotated tag's message is, as before, with a warning if it was set.
+  It must stay inside the repo: no absolute path and no `..`. The build command can
+  write it. A step before the action can too, but that step must check the repo out
+  itself and pass `checkout: false`, because checking out removes untracked files.
 - `directory`: as above. Default `.`.
 - `checkout`: check out the calling repo first. Default `true`; the wrappers pass `false`.
 - `secrets` and `build-secrets`, deprecated: the job's whole secrets context as JSON
@@ -608,7 +616,8 @@ The action's steps, on both platforms:
    release or a re-run.
 8. Build the CLI (`npm ci && npm run build` in `$APPS_TOOLING/cli`).
 9. Build, sign and verify (per platform, below).
-10. The annotated tag's message becomes the release notes.
+10. `scripts/common/release-notes.sh` picks the release notes: `notes-file` when it has
+    text, otherwise the annotated tag's message. A lightweight tag has no message.
 11. `apps publish --platform <platform>`, with `APPS_TOKEN` and `SPARKLE_PRIVATE_KEY`.
 12. Check that the platform's live feed offers the new version.
 

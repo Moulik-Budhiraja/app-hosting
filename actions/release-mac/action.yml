@@ -64,6 +64,13 @@ inputs:
       line, the value, and a line holding only DELIMITER. Values are masked in logs.
       The run fails if a value is empty.
     default: ''
+  notes-file:
+    description: >-
+      Release notes file, relative to the repo root. When it holds text, it's the
+      release notes; otherwise the annotated tag's message is. The build command can
+      write it. A step before this action can too, but then check the repo out in
+      that step and pass checkout: false, since checking out cleans untracked files.
+    default: ''
   build-secrets:
     description: >-
       Deprecated, use build-env. Names of secrets to look up in the secrets input
@@ -216,17 +223,10 @@ runs:
       working-directory: ${{ inputs.directory }}
       env:
         TAG: ${{ github.ref_name }}
+        NOTES_FILE: ${{ inputs.notes-file }}
       run: |
-        # An annotated tag's message becomes the release notes. actions/checkout
-        # fetches the pushed tag as a lightweight tag, so fetch the tag object.
-        git fetch --quiet --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
-        file="$RUNNER_TEMP/release-notes.md"
-        if [[ $(git cat-file -t "refs/tags/$TAG") == tag ]]; then
-          git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG" | sed -e '/^-----BEGIN PGP SIGNATURE-----/,$d' > "$file"
-        fi
-        if [[ -s $file ]] && grep -q '[^[:space:]]' "$file"; then
-          echo "file=$file" >> "$GITHUB_OUTPUT"
-        fi
+        # notes-file when it has text, else the annotated tag's message.
+        bash "$APPS_TOOLING/scripts/common/release-notes.sh" "$TAG" "$NOTES_FILE" >> "$GITHUB_OUTPUT"
 
     - name: Publish
       if: steps.existing.outputs.published != 'true'
