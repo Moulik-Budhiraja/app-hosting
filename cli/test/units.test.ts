@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { defaultBuildSection, expandPath, feedName, platformsOf, validateAppFile } from "../src/appfile.js";
 import { feedVersion } from "../src/commands/manage.js";
 import { publishPlatform } from "../src/commands/publish.js";
-import { parsePlatforms, workflowTemplate } from "../src/commands/setup.js";
+import { integrationLines, parsePlatforms, workflowTemplate } from "../src/commands/setup.js";
 import { loadConfig, normalizeUrl, saveConfig } from "../src/config.js";
 import { generateSparkleKeys, publicKeyFor, readPrivateKey, signArchive, verifyArchive } from "../src/sparkle.js";
 import { compareVersions, defaultBuild, parseVersion } from "../src/version.js";
@@ -196,4 +196,24 @@ test("feed versions are read from both feed formats", () => {
   assert.equal(feedVersion("electron", "version: '0.4.21'\n"), "0.4.21");
   assert.equal(feedVersion("electron", "version: \"1.2.3\"\nfiles:\n  - url: \"releases/1.2.3/App-Setup-1.2.3.exe\"\n"), "1.2.3");
   assert.equal(feedVersion("sparkle", "<item><sparkle:version>1.2.3</sparkle:version><sparkle:shortVersionString>1.2.3</sparkle:shortVersionString></item>"), "1.2.3");
+});
+
+test("electron hints carry the electron-builder 26 notes", () => {
+  const file = {
+    app: "chat",
+    remote: { name: "moulik", url: "https://apps.moulik.dev" },
+    updater: "electron" as const,
+    builds: { mac: defaultBuildSection("chat", "Chat", "electron", "mac"), windows: defaultBuildSection("chat", "Chat", "electron", "windows") },
+  };
+  const text = integrationLines(file).join("\n");
+  assert.match(text, /--config\.extraMetadata\.version=\$VERSION/);
+  assert.match(text, /npm version \$VERSION --no-git-tag-version/);
+  assert.match(text, /reads -c\.extraMetadata\.version=… *\n? *as a config path/);
+  assert.match(text, /--config electron-builder\.config\.js/);
+  assert.match(text, /doesn't load it on its own/);
+  assert.doesNotMatch(text, /use a JS config/);
+
+  const macOnly = integrationLines({ ...file, builds: { mac: file.builds.mac } }).join("\n");
+  assert.match(macOnly, /extraMetadata/);
+  assert.doesNotMatch(macOnly, /Artifact Signing/);
 });

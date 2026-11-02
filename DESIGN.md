@@ -114,6 +114,15 @@ of `scripts/windows/sign.ps1`, which signs the files it's given with Artifact Si
   The workflow verifies and publishes. An unsigned installer fails the release rather
   than being signed afterwards, which would leave the app inside it unsigned and break
   the blockmap.
+
+Electron builds on either platform, with electron-builder 26 (seen on the Windows pool):
+- `-c.extraMetadata.version=...` is read as a config path. Commands set the version with
+  `npm version <version> --no-git-tag-version --allow-same-version` before building, or
+  with `--config.extraMetadata.version=...`.
+- `electron-builder.config.js` isn't loaded on its own. Commands pass it with
+  `--config electron-builder.config.js`. Without it the build is unsigned and uses the
+  default artifact name, so the release fails at the signature check or the
+  `installer`/`dmg` path.
 - `minimumSystemVersion` (optional): the oldest Windows version the app runs on, such
   as `"10.0"` or `"10.0.17763"`. Feeds and the download page pass it on.
 - `icon` (optional): a PNG for the download page, at most 1 MiB and 16-2048 pixels a

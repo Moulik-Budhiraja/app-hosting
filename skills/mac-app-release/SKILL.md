@@ -104,7 +104,7 @@ Mac, native (Sparkle):
 
 Mac, Electron (electron-updater):
 ```json
-"mac": { "kind": "electron", "command": "npm ci && npx electron-builder --mac --publish never -c.extraMetadata.version=$VERSION",
+"mac": { "kind": "electron", "command": "npm ci && npm version \"$VERSION\" --no-git-tag-version --allow-same-version && npx electron-builder --mac --publish never --config electron-builder.config.js",
          "dmg": "dist/MyApp-{version}.dmg", "zip": "dist/MyApp-{version}-mac.zip",
          "blockmap": "dist/MyApp-{version}-mac.zip.blockmap" }
 ```
@@ -135,11 +135,12 @@ Windows, native (WinSparkle):
 
 Windows, Electron (electron-updater, NSIS):
 ```json
-"windows": { "kind": "electron", "command": "npm ci; npx electron-builder --win nsis --publish never -c.extraMetadata.version=$env:VERSION",
+"windows": { "kind": "electron", "command": "npm ci; npm version $env:VERSION --no-git-tag-version --allow-same-version; npx electron-builder --win nsis --publish never --config electron-builder.config.js",
              "installer": "dist/MyApp-Setup-{version}.exe", "blockmap": "dist/MyApp-Setup-{version}.exe.blockmap" }
 ```
 - electron-builder must sign everything itself, with `win.azureSignOptions` read from
-  the environment, so the config has to be JS (`electron-builder.config.js`):
+  the environment, so the config has to be JS (`electron-builder.config.js`), passed
+  with `--config electron-builder.config.js` (see the electron-builder 26 notes below):
   `azureSignOptions: { publisherName: process.env.AZURE_SIGNING_PUBLISHER, endpoint: process.env.AZURE_SIGNING_ENDPOINT, codeSigningAccountName: process.env.AZURE_SIGNING_ACCOUNT, certificateProfileName: process.env.AZURE_SIGNING_PROFILE }`.
   The workflow refuses an unsigned Electron installer instead of signing it, because
   that would break the blockmap and leave the app inside unsigned.
@@ -147,6 +148,15 @@ Windows, Electron (electron-updater, NSIS):
   The blockmap is the installer's name plus `.blockmap`.
 - Same `publish: { provider: generic, url: "<remote url>/<app>/" }` as on Mac;
   electron-updater reads `latest.yml` on Windows.
+
+electron-builder 26 notes, from release runs on the Windows pool. They apply on macOS too:
+- `-c.extraMetadata.version=...` is read as a config path. Set the version with
+  `npm version <version> --no-git-tag-version --allow-same-version` before the build,
+  or with `--config.extraMetadata.version=...`. The examples above use `npm version`
+  because they also pass `--config <file>`.
+- It doesn't load `electron-builder.config.js` on its own. Pass it with
+  `--config electron-builder.config.js`. Without it the build is unsigned and uses the
+  default artifact name, so the paths in `apps.json` don't match.
 
 Monorepo: set `"tagPrefix": "app/v"` and tag `app/v1.2.3`. If `apps.json` isn't at the
 repo root, pass `with: { directory: path }` to each job in `release.yml`.
@@ -281,8 +291,9 @@ installer, so the installer must close the running app (or the app must quit thr
   role on the account. Missing `.NET 8` means the setup-dotnet step didn't run.
 - **"build-secrets: X isn't set".** The secret is missing from the repo's `production`
   environment and repo secrets, or `release.yml` doesn't pass `secrets: inherit`.
-- **"isn't signed" for an Electron installer.** `win.azureSignOptions` is missing or
-  doesn't read the `AZURE_SIGNING_*` variables.
+- **"isn't signed" for an Electron installer.** The command doesn't pass
+  `--config electron-builder.config.js`, or `win.azureSignOptions` is missing or doesn't
+  read the `AZURE_SIGNING_*` variables. A wrong artifact name has the same first cause.
 - **Windows job stuck queued.** No runner has the labels in `runs-on`, or the repo is
   public and not on the Windows controller's allowlist. Ask the user to check the pool
   or allowlist the repo, or pass `runs-on: '"windows-latest"'`.

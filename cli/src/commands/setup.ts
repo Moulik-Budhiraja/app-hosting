@@ -79,13 +79,18 @@ export function integrationLines(file: Pick<AppFile, "app" | "remote" | "updater
       "Point electron-builder at the remote:",
       `  publish: { provider: generic, url: ${base}/ }`,
       "and call autoUpdater.checkForUpdatesAndNotify() from electron-updater.",
+      "With electron-builder 26, set the version with npm version $VERSION --no-git-tag-version --allow-same-version",
+      "  ($env:VERSION on Windows) or --config.extraMetadata.version=$VERSION. It reads -c.extraMetadata.version=…",
+      "  as a config path.",
     );
     if (platforms.includes("windows")) {
       lines.push(
         "On Windows, build an NSIS installer signed with Artifact Signing:",
         "  win: { target: nsis, azureSignOptions: { endpoint, codeSigningAccountName, certificateProfileName, publisherName } }",
-        "  filled from AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE and AZURE_SIGNING_PUBLISHER",
-        "  (use a JS config, such as electron-builder.config.js, to read them from process.env).",
+        "  filled from AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE and AZURE_SIGNING_PUBLISHER.",
+        "  Put it in electron-builder.config.js, which reads them from process.env, and pass that file to the build",
+        "  with --config electron-builder.config.js. electron-builder doesn't load it on its own, and without it the",
+        "  installer comes out unsigned, with the default artifact name.",
       );
     }
   }

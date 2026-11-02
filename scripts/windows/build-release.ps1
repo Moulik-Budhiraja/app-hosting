@@ -58,7 +58,7 @@ if ($signature.Status -ne 'Valid') {
   if ($kind -eq 'electron') {
     # Signing here would change the installer after electron-builder wrote its
     # blockmap, and the app inside would still be unsigned.
-    throw "$installer isn't signed ($($signature.Status)). Set win.azureSignOptions in the electron-builder config from the AZURE_SIGNING_* variables."
+    throw "$installer isn't signed ($($signature.Status)). Pass the config with --config electron-builder.config.js (electron-builder 26 doesn't load it on its own), and set win.azureSignOptions in it from the AZURE_SIGNING_* variables."
   }
   Note "signing $installer"
   & pwsh -NoProfile -NonInteractive -File $env:APPS_SIGN_SCRIPT $installer | Out-Host
