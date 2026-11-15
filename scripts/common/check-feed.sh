@@ -36,7 +36,10 @@ fi
 
 feed="$remote_url/$app/$name"
 for _ in $(seq 1 10); do
-  if curl --fail --silent --show-error --max-time 15 "$feed" | grep -qF "$pattern"; then
+  # Read the whole feed before searching it. grep -q on a pipe stops at the
+  # first match, and curl then fails to write the rest of a feed that's larger
+  # than the pipe holds, which pipefail turns into "not found".
+  if body=$(curl --fail --silent --show-error --max-time 15 "$feed") && grep -qF -- "$pattern" <<<"$body"; then
     echo "$feed offers $version"
     exit 0
   fi
