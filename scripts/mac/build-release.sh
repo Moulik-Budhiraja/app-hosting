@@ -25,7 +25,7 @@ source "$here/lib.sh"
 
 config=${1:-apps.json}
 : "${VERSION:?VERSION is unset}" "${BUILD:?BUILD is unset}"
-[[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "VERSION must look like 1.2.3"
+[[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]] || die "VERSION must look like 1.2.3 or 1.2.3-beta.1"
 [[ $BUILD =~ ^[0-9]+$ ]] || die "BUILD must be a whole number"
 export VERSION BUILD
 require_keychain

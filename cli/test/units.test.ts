@@ -10,7 +10,7 @@ import { publishPlatform } from "../src/commands/publish.js";
 import { actionSecretInputs, integrationLines, parsePlatforms, workflowForm, workflowTemplate } from "../src/commands/setup.js";
 import { loadConfig, normalizeUrl, saveConfig } from "../src/config.js";
 import { generateSparkleKeys, publicKeyFor, readPrivateKey, signArchive, verifyArchive } from "../src/sparkle.js";
-import { compareVersions, defaultBuild, parseVersion } from "../src/version.js";
+import { channelOf, compareVersions, defaultBuild, isVersion, normalizeVersion, parseVersion } from "../src/version.js";
 
 test("default build numbers follow hobola's scheme", () => {
   assert.equal(defaultBuild("1.2.3"), 100200300);
@@ -22,6 +22,24 @@ test("default build numbers follow hobola's scheme", () => {
   assert.throws(() => parseVersion("01.2.3"), /isn't a version/);
   assert.equal(compareVersions("1.10.0", "1.9.9"), 1);
   assert.equal(compareVersions("1.2.3", "1.2.3"), 0);
+});
+
+test("beta versions sort and number below their release", () => {
+  assert.equal(normalizeVersion(" 1.2.3-beta.4 "), "1.2.3-beta.4");
+  assert.equal(channelOf("1.2.3-beta.4"), "beta");
+  assert.equal(channelOf("1.2.3"), "stable");
+  for (const bad of ["1.2.3-beta.0", "1.2.3-beta.100", "1.2.3-beta", "1.2.3-rc.1", "1.2.3-beta.01"]) {
+    assert.equal(isVersion(bad), false, bad);
+    assert.throws(() => normalizeVersion(bad), /isn't a version/);
+  }
+  const ordered = ["1.2.2", "1.2.3-beta.1", "1.2.3-beta.2", "1.2.3-beta.10", "1.2.3", "1.2.4-beta.1"];
+  for (let i = 1; i < ordered.length; i += 1) {
+    assert.equal(compareVersions(ordered[i]!, ordered[i - 1]!), 1, `${ordered[i]} > ${ordered[i - 1]}`);
+    assert.ok(defaultBuild(ordered[i]!) > defaultBuild(ordered[i - 1]!), `build of ${ordered[i]} > ${ordered[i - 1]}`);
+  }
+  assert.equal(defaultBuild("1.2.3-beta.4"), 100200204);
+  assert.equal(defaultBuild("0.8.0-beta.1"), 799901);
+  assert.throws(() => defaultBuild("0.0.0-beta.1"), /no default build/);
 });
 
 const nativeFile = {

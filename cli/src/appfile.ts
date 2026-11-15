@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { checkRemoteName, normalizeUrl } from "./config.js";
 import { CliError, EXIT } from "./errors.js";
+import type { Channel } from "./version.js";
 
 export const APP_NAME = /^[a-z0-9][a-z0-9-]{1,39}$/;
 export const RESERVED_APP_NAMES = new Set(["api", "healthz", "assets", "download"]);
@@ -65,6 +66,8 @@ export interface AppFile {
   updater: Updater;
   /** One prefix, or several: a tag matching any of them releases. */
   tagPrefix: string | string[];
+  /** Branches besides main that a release tag may be on, such as release/*. */
+  releaseBranches?: string[];
   builds: Builds;
 }
 
@@ -84,10 +87,14 @@ export function platformsOf(file: Pick<AppFile, "builds">): Platform[] {
   return PLATFORMS.filter((platform) => file.builds[platform] !== undefined);
 }
 
-/** The feed each updater reads on each platform, relative to /<app>/. */
-export function feedName(updater: Updater, platform: Platform): string {
-  if (updater === "sparkle") return platform === "mac" ? "appcast.xml" : "appcast-windows.xml";
-  return platform === "mac" ? "latest-mac.yml" : "latest.yml";
+/** The feed each updater reads on each platform and channel, relative to /<app>/. */
+export function feedName(updater: Updater, platform: Platform, channel: Channel = "stable"): string {
+  if (updater === "sparkle") {
+    const name = platform === "mac" ? "appcast" : "appcast-windows";
+    return channel === "beta" ? `${name}-beta.xml` : `${name}.xml`;
+  }
+  const name = channel === "beta" ? "beta" : "latest";
+  return platform === "mac" ? `${name}-mac.yml` : `${name}.yml`;
 }
 
 export function checkAppName(name: string): string {
@@ -241,6 +248,15 @@ export function validateAppFile(raw: unknown): AppFile {
     throw bad("tagPrefix can't contain spaces or wildcard characters.");
   }
 
+  let releaseBranches: string[] | undefined;
+  if (value.releaseBranches !== undefined) {
+    const list = Array.isArray(value.releaseBranches) ? value.releaseBranches : [value.releaseBranches];
+    releaseBranches = list.map((item, i) => text(item, `releaseBranches[${i}]`));
+    if (releaseBranches.some((branch) => !/^[A-Za-z0-9_-][A-Za-z0-9._-]*(\/[A-Za-z0-9_-][A-Za-z0-9._-]*)*(\/\*)?$/.test(branch))) {
+      throw bad("releaseBranches must be branch names, or folders of them like release/*.");
+    }
+  }
+
   // The older form, a top-level "build", is the macOS build.
   const builds: Builds = {};
   if (value.build !== undefined && value.builds !== undefined) {
@@ -266,7 +282,7 @@ export function validateAppFile(raw: unknown): AppFile {
     if (!builds.mac && !builds.windows) throw bad('builds needs a "mac" or "windows" build.');
   }
 
-  return { app, remote: { name: remoteName, url }, updater, tagPrefix, builds };
+  return { app, remote: { name: remoteName, url }, updater, tagPrefix, ...(releaseBranches ? { releaseBranches } : {}), builds };
 }
 
 export async function readAppFile(dir: string): Promise<AppFile> {

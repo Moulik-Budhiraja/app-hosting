@@ -15,7 +15,8 @@ import { Store, isAppName } from './store.ts';
 import type { AppRecord, Release } from './store.ts';
 import { PLATFORMS, isPlatform } from './store.ts';
 import { UPLOAD_TTL_MS, cleanupUploads, commitUpload, receiveFile, startUpload } from './uploads.ts';
-import { compareVersions, isVersion } from './versions.ts';
+import { channelOf, compareVersions, isChannel, isVersion } from './versions.ts';
+import type { Channel } from './versions.ts';
 
 export interface AppServer {
   server: Server;
@@ -117,6 +118,7 @@ function publicRelease(config: Config, app: AppRecord, release: Release) {
   const base = `${config.publicUrl}/${app.name}/`;
   return {
     version: release.version,
+    channel: channelOf(release.version),
     build: release.build,
     publishedAt: release.publishedAt,
     // The macOS minimum, for readers from before Windows support.
@@ -146,6 +148,14 @@ function publicAppInfo(config: Config, app: AppRecord, releases: Release[]) {
       releases: `${base}releases.json`,
     },
   };
+}
+
+/** The channel a public route was asked for with ?channel=, stable when it wasn't. */
+function requestedChannel(query: URLSearchParams): Channel {
+  const raw = query.get('channel');
+  if (raw === null) return 'stable';
+  if (!isChannel(raw)) throw badRequest('invalid_channel', 'channel must be stable or beta');
+  return raw;
 }
 
 function pageSize(query: URLSearchParams): number {
@@ -199,33 +209,34 @@ async function publicApp(config: Config, store: Store, req: IncomingMessage, res
   if (rest[0] === 'download' && rest.length === 2) {
     const platform = rest[1];
     if (!isPlatform(platform)) throw notFound();
-    const latest = platformReleases(releases, platform)[0];
+    const latest = platformReleases(releases, platform, requestedChannel(query))[0];
     if (!latest) throw notFound(`${app.title} has no ${PLATFORM_NAMES[platform]} release yet`);
     return redirect(res, 302, `../${releasePath(latest, downloadFile(latest, platform)!)}`);
   }
 
   if (route === 'download') {
-    const available = PLATFORMS.filter((platform) => platformReleases(releases, platform).length > 0);
+    const channel = requestedChannel(query);
+    const available = PLATFORMS.filter((platform) => platformReleases(releases, platform, channel).length > 0);
     if (!available.length) throw notFound(`${app.title} has no releases yet`);
     const visitor = detectPlatform(req.headers['user-agent']);
     const headers = { vary: 'User-Agent', 'cache-control': 'no-cache' };
     // A visitor on a platform the app doesn't ship for sees the page, which says what it does ship for.
     if (visitor && !available.includes(visitor)) return send(res, 302, '', { location: './', ...headers });
     const platform = visitor ?? available[0]!;
-    const latest = platformReleases(releases, platform)[0]!;
+    const latest = platformReleases(releases, platform, channel)[0]!;
     return send(res, 302, '', { location: releasePath(latest, downloadFile(latest, platform)!), ...headers });
   }
 
   const feed = Object.hasOwn(FEEDS[app.updater], route) ? FEEDS[app.updater][route] : undefined;
   if (feed) {
     if (app.updater === 'sparkle') {
-      return send(res, 200, sparkleAppcast(app, releases, config.publicUrl, feed), {
+      return send(res, 200, sparkleAppcast(app, releases, config.publicUrl, feed.platform, feed.channel), {
         'content-type': 'application/rss+xml; charset=utf-8',
         'cache-control': 'no-cache',
       });
     }
-    const yml = electronLatest(releases, feed);
-    if (!yml) throw notFound(`${app.title} has no ${PLATFORM_NAMES[feed]} releases yet`);
+    const yml = electronLatest(releases, feed.platform, feed.channel);
+    if (!yml) throw notFound(`${app.title} has no ${PLATFORM_NAMES[feed.platform]} releases yet`);
     return send(res, 200, yml, { 'content-type': 'text/yaml; charset=utf-8', 'cache-control': 'no-cache' });
   }
 
@@ -234,27 +245,29 @@ async function publicApp(config: Config, store: Store, req: IncomingMessage, res
   if (route === 'app.json') return sendJson(res, 200, publicAppInfo(config, app, releases), noCache);
 
   if (route === 'latest.json') {
+    const channel = requestedChannel(query);
     const requested = query.get('platform');
     if (requested !== null) {
       if (!isPlatform(requested)) throw badRequest('invalid_platform', 'platform must be mac or windows');
-      const latest = platformReleases(releases, requested)[0];
+      const latest = platformReleases(releases, requested, channel)[0];
       if (!latest) throw notFound(`${app.title} has no ${PLATFORM_NAMES[requested]} release yet`);
       return sendJson(res, 200, publicRelease(config, app, latest), noCache);
     }
     return sendJson(res, 200, Object.fromEntries(PLATFORMS.map((platform) => {
-      const latest = platformReleases(releases, platform)[0];
+      const latest = platformReleases(releases, platform, channel)[0];
       return [platform, latest ? publicRelease(config, app, latest) : null];
     })), noCache);
   }
 
   if (route === 'releases.json') {
     const limit = pageSize(query);
+    const channel = requestedChannel(query);
     const before = query.get('before');
     if (before !== null && !isVersion(before)) throw badRequest('invalid_before', 'before must be a version like 1.2.3');
-    const live = liveReleases(releases).filter((release) => before === null || compareVersions(release.version, before) < 0);
+    const live = liveReleases(releases, channel).filter((release) => before === null || compareVersions(release.version, before) < 0);
     const page = live.slice(0, limit);
     const next = live.length > limit
-      ? `${config.publicUrl}/${app.name}/releases.json?limit=${limit}&before=${page.at(-1)!.version}`
+      ? `${config.publicUrl}/${app.name}/releases.json?limit=${limit}&before=${page.at(-1)!.version}${channel === 'beta' ? '&channel=beta' : ''}`
       : null;
     return sendJson(res, 200, { releases: page.map((release) => publicRelease(config, app, release)), next }, {
       ...noCache,
@@ -264,7 +277,7 @@ async function publicApp(config: Config, store: Store, req: IncomingMessage, res
 
   if (rest.length === 2 && rest[0] === 'releases' && rest[1]!.endsWith('.json')) {
     const version = rest[1]!.slice(0, -'.json'.length);
-    const release = liveReleases(releases).find((candidate) => candidate.version === version);
+    const release = liveReleases(releases, 'beta').find((candidate) => candidate.version === version);
     if (!release) throw notFound(`${app.title} has no live release ${version}`);
     return sendJson(res, 200, publicRelease(config, app, release), noCache);
   }
@@ -299,7 +312,7 @@ function appView(config: Config, app: AppRecord) {
 
 function releaseView(config: Config, app: AppRecord, release: Release) {
   const base = `${config.publicUrl}/${app.name}/`;
-  return { ...release, files: release.files.map((file) => ({ ...file, url: base + releasePath(release, file) })) };
+  return { ...release, channel: channelOf(release.version), files: release.files.map((file) => ({ ...file, url: base + releasePath(release, file) })) };
 }
 
 async function requireExistingApp(store: Store, name: string | undefined): Promise<AppRecord> {

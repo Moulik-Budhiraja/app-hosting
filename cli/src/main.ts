@@ -28,13 +28,14 @@ Setting up an app (run in the app's repo):
                                    Connect the GitHub repo: environment, secrets, release workflow
 
 Releasing:
-  apps publish --version X.Y.Z [--platform mac|windows] [--build N] [--notes-file <path>]
+  apps publish --version X.Y.Z[-beta.N] [--platform mac|windows] [--build N] [--notes-file <path>]
                [--minimum-system-version v] [--icon <png>] and the platform's files:
                macOS:   --dmg <path> [--zip <path>] [--blockmap <path>]
                Windows: --installer <path> [--blockmap <path>]
-                                   --platform defaults to windows with --installer, else mac
+                                   --platform defaults to windows with --installer, else mac.
+                                   X.Y.Z-beta.N goes to the beta channel, which only beta installs read
   apps icon <icon.png>             Set the icon on the app's download page (--remove to drop it, admin)
-  apps status [--expect X.Y.Z] [--platform p]
+  apps status [--expect X.Y.Z] [--platform p] [--channel stable|beta]
                                    Latest release per platform and whether the live feeds match
   apps releases [--app a --remote r]
   apps withdraw <version>          Take a release out of the feed (admin)
@@ -88,7 +89,7 @@ const COMMAND_OPTIONS = {
     "minimum-system-version": { type: "string" },
     icon: { type: "string" },
   },
-  status: { expect: { type: "string" }, platform: { type: "string" } },
+  status: { expect: { type: "string" }, platform: { type: "string" }, channel: { type: "string" } },
   releases: TARGET,
   withdraw: TARGET,
   restore: TARGET,
@@ -194,7 +195,7 @@ export async function run(argv: string[], deps: Deps): Promise<number> {
         break;
       case "status":
         if (positionals.length) throw usage("apps status takes no arguments.");
-        return await statusCommand(deps, out, { dir, expect: str("expect"), platform: str("platform") });
+        return await statusCommand(deps, out, { dir, expect: str("expect"), platform: str("platform"), channel: str("channel") });
       case "releases":
         if (positionals.length) throw usage("Usage: apps releases [--app a --remote r]");
         await releasesCommand(deps, out, { dir, app: str("app"), remote: str("remote") });

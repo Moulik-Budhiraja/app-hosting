@@ -4,7 +4,7 @@ import { getRemote, loadConfig } from "../config.js";
 import { client, formatBytes, formatDate, requireAdmin, table, type Deps, type Out } from "../context.js";
 import { CliError, EXIT, usage } from "../errors.js";
 import { readIcon } from "../icon.js";
-import { defaultBuild, parseVersion } from "../version.js";
+import { channelOf, defaultBuild, isChannel, normalizeVersion, type Channel } from "../version.js";
 
 interface Target {
   app: string;
@@ -33,12 +33,12 @@ async function loadReleases(api: ApiClient, app: string): Promise<{ releases: Re
 }
 
 /**
- * Every live release from the public releases.json, following its `next` links.
- * Servers from before paging answer with the whole list as an array.
+ * Every live release, betas included, from the public releases.json, following
+ * its `next` links. Servers from before paging answer with the whole list as an array.
  */
 export async function publicReleases(api: ApiClient, app: string): Promise<Release[]> {
   const releases: Release[] = [];
-  let path: string | null = `/${encodeURIComponent(app)}/releases.json?limit=100`;
+  let path: string | null = `/${encodeURIComponent(app)}/releases.json?limit=100&channel=beta`;
   for (let page = 0; path !== null; page += 1) {
     if (page >= 1000) throw new CliError(`${app}'s releases.json on ${api.remoteName} keeps returning more pages.`, EXIT.failure);
     const text = await api.publicText(path);
@@ -59,9 +59,10 @@ function sortNewestFirst(releases: Release[]): Release[] {
   return [...releases].sort((a, b) => b.build - a.build);
 }
 
-/** The newest live release with files for the platform. */
-function latestLive(releases: Release[], platform: Platform): Release | undefined {
-  return sortNewestFirst(releases).find((release) => !release.withdrawn && hasPlatform(release, platform));
+/** The newest live release a channel offers for the platform. The beta channel also offers stable releases. */
+function latestLive(releases: Release[], platform: Platform, channel: Channel): Release | undefined {
+  return sortNewestFirst(releases).find((release) =>
+    !release.withdrawn && hasPlatform(release, platform) && (channel === "beta" || channelOf(release.version) === "stable"));
 }
 
 export async function releasesCommand(deps: Deps, out: Out, options: { dir: string; app?: string; remote?: string }): Promise<void> {
@@ -92,7 +93,7 @@ export async function withdrawCommand(
 ): Promise<void> {
   const verb = options.withdraw ? "withdraw" : "restore";
   if (positionals.length !== 1) throw usage(`Usage: apps ${verb} <version>`);
-  const version = parseVersion(positionals[0]!).join(".");
+  const version = normalizeVersion(positionals[0]!);
   const where = await target(deps, options);
   const api = await client(deps, where.remote, where.url);
   await requireAdmin(deps, api);
@@ -181,9 +182,14 @@ export function feedVersion(updater: Updater, text: string): string | null {
   return match ? match[1]! : null;
 }
 
-export async function statusCommand(deps: Deps, out: Out, options: { dir: string; expect?: string; platform?: string }): Promise<number> {
+export async function statusCommand(deps: Deps, out: Out, options: { dir: string; expect?: string; platform?: string; channel?: string }): Promise<number> {
   const file = await readAppFile(options.dir);
-  const expected = options.expect ? parseVersion(options.expect).join(".") : undefined;
+  const expected = options.expect ? normalizeVersion(options.expect) : undefined;
+  if (options.channel !== undefined && !isChannel(options.channel)) {
+    throw usage(`--channel must be stable or beta, not "${options.channel}".`);
+  }
+  // An expected beta can only be on the beta feed.
+  const channel: Channel = options.channel ?? (expected ? channelOf(expected) : "stable");
   if (options.platform !== undefined && !isPlatform(options.platform)) {
     throw usage(`--platform must be mac or windows, not "${options.platform}".`);
   }
@@ -191,11 +197,11 @@ export async function statusCommand(deps: Deps, out: Out, options: { dir: string
   const api = await client(deps, file.remote.name, file.remote.url);
   const { releases, source } = await loadReleases(api, file.app);
 
-  const lines = [`${file.app} on ${file.remote.name} (${file.remote.url}), ${file.updater}`];
+  const lines = [`${file.app} on ${file.remote.name} (${file.remote.url}), ${file.updater}${channel === "beta" ? ", beta channel" : ""}`];
   const results = [];
   for (const platform of platforms) {
-    const latest = latestLive(releases, platform);
-    const feedPath = `/${file.app}/${feedName(file.updater, platform)}`;
+    const latest = latestLive(releases, platform, channel);
+    const feedPath = `/${file.app}/${feedName(file.updater, platform, channel)}`;
     const feedText = await api.publicText(feedPath);
     const live = feedText === null ? null : feedVersion(file.updater, feedText);
     const want = expected ?? latest?.version ?? null;
@@ -214,6 +220,7 @@ export async function statusCommand(deps: Deps, out: Out, options: { dir: string
     app: file.app,
     remote: file.remote.name,
     updater: file.updater,
+    channel,
     platforms: results,
     expected: expected ?? null,
     ok,
@@ -224,7 +231,7 @@ export async function statusCommand(deps: Deps, out: Out, options: { dir: string
 
 export function buildNumberCommand(out: Out, positionals: string[]): void {
   if (positionals.length !== 1) throw usage("Usage: apps build-number <version>");
-  const version = parseVersion(positionals[0]!).join(".");
+  const version = normalizeVersion(positionals[0]!);
   const build = defaultBuild(version);
   out.result(String(build), { version, build });
 }

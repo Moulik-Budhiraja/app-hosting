@@ -51,6 +51,13 @@ if (prefixes.some((p) => /[\s*?[\]~^:\\]/.test(p))) fail("tagPrefix can't contai
 if (new Set(prefixes).size !== prefixes.length) fail('tagPrefix lists the same prefix twice');
 out.tag_prefix = prefixes[0];
 out.tag_prefixes = [...prefixes].sort((a, b) => b.length - a.length).join(' ');
+// releaseBranches names branches besides main that a release tag may be on:
+// a branch name, or a folder of them such as release/*.
+const branches = c.releaseBranches === undefined ? [] : Array.isArray(c.releaseBranches) ? c.releaseBranches : [c.releaseBranches];
+if (!branches.every((b) => str(b) && /^[A-Za-z0-9_-][A-Za-z0-9._-]*(\/[A-Za-z0-9_-][A-Za-z0-9._-]*)*(\/\*)?$/.test(b))) {
+  fail('releaseBranches must be branch names, or folders of them like release/*');
+}
+out.release_branches = branches.join(' ');
 out.kind = b.kind;
 out.command = b.command;
 

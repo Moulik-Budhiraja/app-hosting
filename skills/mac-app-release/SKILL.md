@@ -71,6 +71,7 @@ hold back the Mac one; re-run it and it joins the release. The remote serves:
   (`/download/mac`, `/download/windows` for a specific one)
 - feeds: `/appcast.xml` (Sparkle) and `/appcast-windows.xml` (WinSparkle), or
   `/latest-mac.yml` and `/latest.yml` (electron-updater)
+- beta feeds, for installs that opted in: see "Beta releases" below
 
 ## Remotes
 
@@ -209,6 +210,35 @@ releases, and the longest prefix the tag starts with gives the version, so `v0.7
 the Mac workflow triggers on `v*`, the Windows one on `v*` and `win-v*`. Then `v1.2.3`
 releases both platforms from one commit with the same version, and `win-v1.2.3` releases
 Windows only. `apps init` adds an environment tag rule for every prefix.
+
+## Beta releases
+
+An app has two channels. Stable is what everyone gets. Beta is for installs that opted in.
+
+- **Ship a beta** by tagging `v1.2.3-beta.1` (N from 1 to 99). The same workflow builds,
+  signs and publishes it. A version's betas come before it, so `v1.2.3` is the stable
+  release that follows them. No other suffix works (`-rc.1`, `-alpha.1`).
+- **Who gets it.** Only the beta feeds offer a beta: `/beta-mac.yml` and `/beta.yml`
+  (electron-updater), or `/appcast-beta.xml` and `/appcast-windows-beta.xml` (Sparkle,
+  WinSparkle). The stable feeds, the download page and `/download` never show one. Give
+  someone a beta with `<remote>/<app>/download/mac?channel=beta` (or `windows`).
+- **Beta installs don't fall behind.** The beta feeds also offer stable releases, so a
+  beta install moves to `1.2.3` when it ships.
+- **Electron apps.** electron-builder writes `channel: beta` into a build whose version
+  is `X.Y.Z-beta.N`, so that build reads the beta feed with no code. To let a stable
+  install opt in, set `autoUpdater.channel = 'beta'` and then
+  `autoUpdater.allowDowngrade = false`, because setting the channel turns downgrades on.
+- **Sparkle apps.** A beta install sets the beta feed as its `SUFeedURL`, or passes it
+  to `win_sparkle_set_appcast_url`. A beta build on Windows reports `X.Y.Z-beta.N`.
+- **A stable fix while a beta is out.** `1.0.1` publishes after `1.1.0-beta.1`, because
+  a stable release only has to be newer than the stable ones. A beta has to be newer
+  than every release.
+- **Releasing from a branch.** Tags are on `main`. To tag another branch, such as a fix
+  for the stable version while `main` holds the next one, list it in `apps.json`:
+  `"releaseBranches": ["release/*"]`. Protect those branches like `main`, because a
+  tag on one of them releases to everyone.
+- `apps status --channel beta` checks the beta feeds, and `apps withdraw 1.2.3-beta.1`
+  pulls a bad beta.
 
 Monorepo: set `"tagPrefix": "app/v"` and tag `app/v1.2.3`. If `apps.json` isn't at the
 repo root, pass `with: { directory: path }` to each job in `release.yml` (to the action's

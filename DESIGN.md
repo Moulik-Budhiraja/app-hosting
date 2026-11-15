@@ -19,7 +19,7 @@ you change a contract here, change every part that uses it.
   from their own jobs. `.github/workflows/release-mac.yml` and `release-windows.yml` are
   reusable workflows that wrap them for apps under `Moulik-Budhiraja`. They use `scripts/common/`
   (`read-config.mjs` and its `read-config.sh` wrapper, `check-tag.sh`, `published.sh`,
-  `build-env.mjs`, `with-build-secrets.mjs`),
+  `check-feed.sh`, `build-env.mjs`, `with-build-secrets.mjs`),
   `scripts/mac/*.sh` and `scripts/windows/*.ps1`.
 - `skills/mac-app-release/SKILL.md`: tells agents to use all of the above instead of
   building release setups by hand. It covers Windows too, despite the name.
@@ -35,10 +35,18 @@ you change a contract here, change every part that uses it.
     Sparkle appcast and check Ed25519 (`sparkle:edSignature`) signatures, so one key
     pair serves both platforms.
   - `electron`: electron-updater on both platforms.
-- **version**: `X.Y.Z`, three numeric parts. **build**: an integer that rises with the
-  version. The default is `X*100000000 + Y*100000 + Z*100` (1.2.3 is 100200300), the
-  same scheme hobola uses. Sparkle on macOS compares builds. WinSparkle and
-  electron-updater compare versions.
+- **version**: `X.Y.Z`, three numeric parts, or `X.Y.Z-beta.N` for a beta, with N from 1
+  to 99. A version's betas come before it: 1.2.3-beta.1, 1.2.3-beta.2, then 1.2.3. No
+  other suffix is a version. **build**: an integer that rises with the version. The
+  default is `X*100000000 + Y*100000 + Z*100` (1.2.3 is 100200300), the same scheme
+  hobola uses. A beta takes one of the 99 builds below its version's: 1.2.3-beta.4 is
+  100200204, above 1.2.2 and below 1.2.3. Sparkle on macOS compares builds. WinSparkle
+  and electron-updater compare versions.
+- **channel**: `stable` or `beta`. It comes from the version and is stored nowhere:
+  `X.Y.Z-beta.N` is a beta release, and every other release is stable. The stable
+  channel offers stable releases only. The beta channel offers every release, so an
+  install on it moves to a stable release that is newer than its last beta. Each
+  channel has its own feeds, and an install picks its channel by the feed it reads.
 - **release**: one version of an app. It holds files for one or more platforms. Each
   platform is published on its own, so 1.2.3 can ship for macOS first and gain its
   Windows files later. Once a platform's files are published they never change.
@@ -81,7 +89,13 @@ you change a contract here, change every part that uses it.
   every job on every prefix, and an app that wants `win-v*` to release Windows only
   splits its jobs into workflows with their own `tags:`, such as `release-mac.yml` on
   `v*` and `release-windows.yml` on `v*` and `win-v*`. Both platforms built from the
-  same `v` tag share the version and build number, so they join one release.
+  same `v` tag share the version and build number, so they join one release. A beta's
+  tag is the same prefix with the beta version, such as `v1.2.3-beta.1`.
+- `releaseBranches` (optional): branches besides `main` that a release tag may be on,
+  as a name or a list, such as `["release/*"]`. Each is a branch name, or a folder of
+  them ending in `/*`. Without it every tag has to be on `main`. An app that sets it
+  should protect those branches the way it protects `main`, because a tag on one of
+  them releases to everyone.
 - A `native` build must use `sparkle`, and an `electron` build must use `electron`, on
   both platforms.
 - Paths stay inside the repo: no leading `/` or `~`, and no `..`. Artifact paths can use
@@ -198,9 +212,11 @@ File roles, per updater and platform. Each platform of a release has exactly the
 | `electron` | `mac` | one `dmg`; one `zip`, the update archive; optionally a `blockmap` named `<zip name>.blockmap` |
 | `electron` | `windows` | one `installer` (`.exe`, NSIS), which is also the update; optionally a `blockmap` named `<installer name>.blockmap` |
 
-A platform's **live releases** are the non-withdrawn releases with files for that
-platform, newest first. Its **latest release** is the first of them. Feeds, downloads
-and the download page work per platform from these.
+A platform's **live releases** on a channel are the non-withdrawn releases with files
+for that platform that the channel offers, newest first. Its **latest release** is the
+first of them. Feeds, downloads and the download page work per platform from these.
+Everything below means the stable channel unless it names the beta one, so an app with
+no betas works as it did before channels.
 
 ### Public routes
 
@@ -214,8 +230,9 @@ Everything outside `/api` is public and read-only. These are all of it:
 | `GET /<app>/app.json` | the app's public metadata, see below |
 | `GET /<app>/latest.json` | `{"mac": <release> \| null, "windows": <release> \| null}`: each platform's latest release |
 | `GET /<app>/latest.json?platform=mac\|windows` | that platform's latest release; 404 if it has none, 400 for another platform |
+| `?channel=beta` on `latest.json`, `releases.json`, `download` and `download/<platform>` | the same for the beta channel. `?channel=stable` is the default, and any other value answers 400 |
 | `GET /<app>/releases.json` | one page of live releases, newest first: `{"releases": [...], "next": <url> \| null}`, see below |
-| `GET /<app>/releases/<version>.json` | one live release; 404 if it doesn't exist or is withdrawn |
+| `GET /<app>/releases/<version>.json` | one live release, stable or beta; 404 if it doesn't exist or is withdrawn |
 | `GET /<app>/releases/<version>/<file>` | artifact, with `Content-Length`, `ETag` and Range support |
 | `GET /<app>/icon.png` | the app's icon. Pages link to `icon.png?v=<first 12 hex of its sha256>`, which is cached for good; without a matching `v` it's `no-cache` |
 | `GET /<app>/download` | 302 to the visitor's platform's download, see below |
@@ -225,6 +242,8 @@ Everything outside `/api` is public and read-only. These are all of it:
 | `GET /<app>/appcast-windows.xml` | WinSparkle feed for Windows (sparkle apps only): the newest 10 live releases |
 | `GET /<app>/latest-mac.yml` | electron-updater feed for macOS (electron apps only) |
 | `GET /<app>/latest.yml` | electron-updater feed for Windows (electron apps only) |
+| `GET /<app>/appcast-beta.xml`, `appcast-windows-beta.xml` | the beta channel's Sparkle and WinSparkle feeds (sparkle apps only) |
+| `GET /<app>/beta-mac.yml`, `beta.yml` | the beta channel's electron-updater feeds (electron apps only) |
 
 Every route takes `HEAD` too. Withdrawn releases leave the feeds, the JSON routes, the
 download pages and the download routes, but their files still serve. Unknown app or path
@@ -249,7 +268,7 @@ otherwise, so `curl -L .../download` keeps returning the DMG. Responses that dep
 the User-Agent send `Vary: User-Agent` and `Cache-Control: no-cache`.
 
 **A release** in `latest.json`, `releases.json` and `releases/<version>.json` has
-`version`, `build`, `publishedAt`, `notes`, `platforms`, and `files` (`name`,
+`version`, `channel`, `build`, `publishedAt`, `notes`, `platforms`, and `files` (`name`,
 `platform`, `role`, `size`, `url`). It also keeps a top-level `minimumSystemVersion`,
 the macOS one or null, for older readers. It lists the files of every platform, also in
 `latest.json?platform=`.
@@ -257,7 +276,8 @@ the macOS one or null, for older readers. It lists the files of every platform, 
 **`releases.json` pages.** `?limit=N` sets the page size, 1 to 100, default 20.
 `?before=<version>` starts the page after that version, which need not exist. `next`
 is the absolute URL of the following page, or null on the last one, and the same URL
-comes as `Link: <url>; rel="next"`. Follow `next` until it's null to read every
+comes as `Link: <url>; rel="next"`. It keeps `channel=beta` when the page was asked for
+with it. Follow `next` until it's null to read every
 release. Bad `limit` or `before` values answer 400. Before paging (until November 2026)
 the body was a plain array of every live release; `apps releases` and `published.sh`
 still read that form from an older server.
@@ -266,7 +286,8 @@ still read that form from an older server.
 `icon` (the versioned `icon.png` URL, or null), and `urls`: `page`, `download`,
 `downloads` and `feeds` keyed by platform (only platforms with a live release),
 `latest` and `releases`. It leaves out what only the admin API shows, such as the
-Sparkle public key and publish tokens.
+Sparkle public key and publish tokens. It describes the stable channel: a platform
+with only betas isn't listed, and `feeds` are the stable feeds.
 
 ### Download page
 
@@ -283,6 +304,9 @@ date, a "Download for Mac" or "Download for Windows" button linking to
 "Windows 10 or later"), the release notes, and earlier versions from that platform's
 live releases. When the app also has releases for the other platform, a link under the
 button ("Also for Windows" or "Also for Mac") goes to `?platform=<other>`.
+
+The pages and the app list never show a beta. People who should run one get its link:
+`download/<platform>?channel=beta`, or the file's own URL.
 
 ### Feeds
 
@@ -331,6 +355,14 @@ releaseNotes: "..."            # only when there are notes
 `latest.yml` is the same for the latest Windows release, with the installer in place of
 the zip and `platforms.windows` for the date and minimum system.
 
+**Beta feeds** have the same form and hold the beta channel's releases:
+`appcast-beta.xml` and `appcast-windows-beta.xml` list its newest 10, and `beta-mac.yml`
+and `beta.yml` give its latest. `beta-mac.yml` and `beta.yml` are the names
+electron-updater asks for when its channel is `beta`, which electron-builder sets by
+itself in a build whose version is `X.Y.Z-beta.N`. A Sparkle app reads the beta feed
+by setting it as its feed URL. WinSparkle gets the whole version, so a beta build of a
+native Windows app must report its version as `X.Y.Z-beta.N`.
+
 ### API (JSON, `Authorization: Bearer <token>`)
 
 Two kinds of token: the **admin** token (env), which can do everything, and **publish**
@@ -365,16 +397,20 @@ file.
 Starting an upload publishes one platform:
 `{version, platform?, build?, notes?, minimumSystemVersion?, edSignature?, files:[{name,role,size,sha256}]}`.
 `platform` defaults to `mac`, so older CLIs keep working. The server checks that:
-- the version is `X.Y.Z`, and either
+- the version is `X.Y.Z` or `X.Y.Z-beta.N`, and either
   - **a new release:** no release has this version, the version is strictly newer than
-    **every** existing release, withdrawn ones included, and `build` (which defaults to
-    the scheme above) is higher than every existing build; or
+    **every** existing release it's checked against, withdrawn ones included, and
+    `build` (which defaults to the scheme above) is higher than each of their builds; or
   - **a new platform for an existing release:** the release has no files for this
     platform yet (else 409 `already_published`), isn't withdrawn (else 409
-    `release_withdrawn`), and is newer than every other release with files for this
-    platform (else 409 `version_not_newer`). `build`, if given, must equal the release's
+    `release_withdrawn`), and is newer than every other release it's checked against
+    with files for this platform (else 409 `version_not_newer`). `build`, if given, must equal the release's
     build (else 409 `build_mismatch`); if not given, it's the release's build. File names
     must not clash with the release's files (else 409 `file_exists`).
+
+  A beta is checked against every release. A stable release is checked against the
+  stable ones only, so a fix for the stable version can ship while a later version is
+  in beta: 1.0.1 publishes after 1.1.0-beta.1, and beta installs stay on the beta.
 - the file names are safe (`^[A-Za-z0-9._-]+$`, no leading dot), and the files are
   exactly what the role table allows for the app's updater and this platform. An
   `installer` ends in `.exe` or `.msi` (`.exe` only for electron).
@@ -422,12 +458,12 @@ Re-running a commit that already succeeded returns 409 `already_published`.
 | `apps logout <remote>` | forget the token |
 | `apps create <app> --remote <r> --updater sparkle\|electron [--title T] [--kind native\|electron] [--platforms mac,windows]` | create the app on the remote (for sparkle: generate an Ed25519 key pair, keep the private key in the keychain, send the public key) and write `apps.json` with a default build for each platform. `--platforms` defaults to `mac` |
 | `apps init [--repo owner/name] [--signing-dir ~/.config/predictor-release]` | in a repo with `apps.json`: create the GitHub `production` environment, allowed only from `<prefix>*` tags, one rule per `tagPrefix` entry (existing rules stay); set the environment secrets (below) for the platforms in `builds`; write `.github/workflows/release.yml` if missing (calling the reusable workflows when the repo's owner is `Moulik-Budhiraja`, and running the composite actions in its own jobs otherwise); for a public repo, require approval for workflows from every external contributor's fork pull request and say that the runner must allowlist the repo; print what the app must contain for each platform |
-| `apps publish --version X [--platform mac\|windows] [--build N] [--notes-file f] [--minimum-system-version v] [--icon png]` and the platform's files: `--dmg p [--zip p] [--blockmap p]` for macOS, `--installer p [--blockmap p]` for Windows | read `apps.json`, sign the update file for sparkle, upload with progress, commit, set the icon if given (a failure there only warns), print the release. `--platform` defaults to `windows` when `--installer` is given and to `mac` otherwise |
+| `apps publish --version X [--platform mac\|windows] [--build N] [--notes-file f] [--minimum-system-version v] [--icon png]` and the platform's files: `--dmg p [--zip p] [--blockmap p]` for macOS, `--installer p [--blockmap p]` for Windows | read `apps.json`, sign the update file for sparkle, upload with progress, commit, set the icon if given (a failure there only warns), print the release. `--platform` defaults to `windows` when `--installer` is given and to `mac` otherwise. A version `X.Y.Z-beta.N` publishes to the beta channel; there's no other switch |
 | `apps icon <png>` / `apps icon --remove` | set the app's icon, or remove it (admin) |
 | `apps releases [--app a --remote r]` | list releases, with their platforms. Logged in it reads the admin API, which includes withdrawn ones; otherwise it follows `releases.json`'s `next` pages |
 | `apps withdraw <version>` / `apps restore <version>` | admin |
 | `apps token create\|list\|revoke` | manage publish tokens for the current app |
-| `apps status [--expect X.Y.Z] [--platform p]` | the current app, its remote, and for each platform in `builds` (or just `--platform`) the latest release and whether the live feed matches. `--json` gives `{..., platforms: [{platform, latest, feed, ok}], ok}`, and the exit code is 1 if any platform is off |
+| `apps status [--expect X.Y.Z] [--platform p] [--channel stable\|beta]` | the current app, its remote, and for each platform in `builds` (or just `--platform`) the channel's latest release and whether its live feed matches. `--channel` defaults to the channel of `--expect`, else `stable`. `--json` gives `{..., channel, platforms: [{platform, latest, feed, ok}], ok}`, and the exit code is 1 if any platform is off |
 | `apps build-number <version>` | print the default build for a version |
 
 Secrets that `apps init` sets on the GitHub `production` environment:
@@ -608,9 +644,10 @@ The action's steps, on both platforms:
    `environment: production`, the `apps-token` input, or the secret itself.
 5. Check and mask `build-env`.
 6. `scripts/common/check-tag.sh <tag> <prefix>...` checks the tag against every
-   `tagPrefix` and that the tagged commit is on `origin/main`. The longest prefix the tag
-   starts with gives the version, so overlapping prefixes such as `v` and `v-beta` pick
-   the more specific one.
+   `tagPrefix` and that the tagged commit is on `origin/main`, or on a branch that
+   `releaseBranches` allows (`RELEASE_BRANCHES`). The longest prefix the tag starts
+   with gives the version, so overlapping prefixes such as `v` and `v-win` pick the
+   more specific one. A beta tag gets its beta build.
 7. The job skips the rest if `scripts/common/published.sh` finds the version live with
    files for its platform in `/<app>/releases/<version>.json`, for example after a local
    release or a re-run.
@@ -619,7 +656,8 @@ The action's steps, on both platforms:
 10. `scripts/common/release-notes.sh` picks the release notes: `notes-file` when it has
     text, otherwise the annotated tag's message. A lightweight tag has no message.
 11. `apps publish --platform <platform>`, with `APPS_TOKEN` and `SPARKLE_PRIVATE_KEY`.
-12. Check that the platform's live feed offers the new version.
+12. `scripts/common/check-feed.sh` checks that the platform's live feed offers the new
+    version: the beta feed for a beta, the stable feed otherwise.
 
 ### macOS (`release-mac.yml`, `actions/release-mac`)
 
@@ -673,7 +711,8 @@ Its build steps, in `scripts/windows/build-release.ps1`:
 3. For native builds, sign the installer with `sign.ps1` if `Get-AuthenticodeSignature`
    doesn't already report it `Valid`. Electron builds fail instead (see above).
 4. Verify: the installer's signature is `Valid` and timestamped. If the installer's
-   `ProductVersion` is set, it must start with the version.
+   `ProductVersion` is set, it must start with the version. For a beta, starting with
+   its `X.Y.Z` part is enough.
 5. Publish with `--installer`, `--blockmap`, `--minimum-system-version` from
    `builds.windows`, and `--icon` from `builds.windows.icon` when set.
 

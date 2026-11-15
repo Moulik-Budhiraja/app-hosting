@@ -206,6 +206,49 @@ test("electron app: create, publish with zip and blockmap", async () => {
   }
 });
 
+test("electron app: a beta goes to the beta feed and leaves the stable one alone", async () => {
+  const h = await loggedIn();
+  try {
+    assert.equal((await h.run("create", "beta-agent", "--remote", "moulik", "--updater", "electron")).code, 0);
+    const publish = async (version: string) => {
+      await writeFile(join(h.dir, `App-${version}.dmg`), Buffer.alloc(2000, 1));
+      await writeFile(join(h.dir, `App-${version}-mac.zip`), Buffer.alloc(3000, 2));
+      return h.run("publish", "--version", version, "--dmg", `App-${version}.dmg`, "--zip", `App-${version}-mac.zip`, "--json");
+    };
+    const first = await publish("0.5.0");
+    assert.equal(first.code, 0, first.stderr);
+
+    const beta = await publish("0.6.0-beta.1");
+    assert.equal(beta.code, 0, beta.stderr);
+    const published = JSON.parse(beta.stdout);
+    assert.deepEqual([published.release.version, published.release.build], ["0.6.0-beta.1", 599901]);
+    assert.match(published.feed, /\/beta-agent\/beta-mac\.yml$/);
+    assert.equal((await publish("0.6.0-beta")).code, 2);
+
+    // The stable channel still ends at 0.5.0, and takes a fix while 0.6.0 is in beta.
+    const stable = JSON.parse((await h.run("status", "--json")).stdout);
+    assert.deepEqual([stable.ok, stable.channel, stable.platforms[0].latest.version, stable.platforms[0].feed.version], [true, "stable", "0.5.0", "0.5.0"]);
+    assert.equal((await publish("0.5.1")).code, 0);
+    assert.equal((await h.run("status", "--expect", "0.5.1")).code, 0);
+
+    const onBeta = JSON.parse((await h.run("status", "--channel", "beta", "--json")).stdout);
+    assert.deepEqual([onBeta.ok, onBeta.channel, onBeta.platforms[0].latest.version], [true, "beta", "0.6.0-beta.1"]);
+    assert.match(onBeta.platforms[0].feed.url, /beta-mac\.yml$/);
+    // Expecting a beta checks the beta feed.
+    assert.equal((await h.run("status", "--expect", "0.6.0-beta.1")).code, 0);
+    assert.equal((await h.run("status", "--channel", "nightly")).code, 2);
+
+    const releases = JSON.parse((await h.run("releases", "--json")).stdout).releases;
+    assert.deepEqual(releases.map((item: { version: string }) => item.version), ["0.6.0-beta.1", "0.5.1", "0.5.0"]);
+    assert.equal((await h.run("build-number", "0.6.0-beta.1")).stdout.trim(), "599901");
+
+    assert.equal((await h.run("withdraw", "0.6.0-beta.1")).code, 0);
+    assert.equal(JSON.parse((await h.run("status", "--channel", "beta", "--json")).stdout).platforms[0].feed.version, "0.5.1");
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("icons: publish --icon, apps icon, apps icon --remove", async () => {
   const h = await loggedIn();
   const png = (size: number) => {

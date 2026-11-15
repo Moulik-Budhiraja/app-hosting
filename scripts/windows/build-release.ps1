@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 
 function Note([string]$message) { Write-Host "==> $message" }
 
-if ($env:VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw 'VERSION must look like 1.2.3' }
+if ($env:VERSION -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$') { throw 'VERSION must look like 1.2.3 or 1.2.3-beta.1' }
 if ($env:BUILD -notmatch '^[0-9]+$') { throw 'BUILD must be a whole number' }
 $version = $env:VERSION
 if (-not (Test-Path -LiteralPath $Config)) { throw "$Config not found" }
@@ -73,7 +73,9 @@ Note "$installer is signed by $($signature.SignerCertificate.Subject)"
 $productVersion = (Get-Item -LiteralPath $installer).VersionInfo.ProductVersion
 if ($productVersion) {
   $productVersion = $productVersion.Trim()
-  if ($productVersion -notmatch "^$([regex]::Escape($version))(?![0-9])") {
+  # A beta's installer may carry its whole version or only the X.Y.Z part.
+  $base = $version -replace '-beta\.[0-9]+$', ''
+  if ($productVersion -notmatch "^$([regex]::Escape($version))(?![0-9])" -and $productVersion -notmatch "^$([regex]::Escape($base))(?![0-9-])") {
     throw "$installer says version '$productVersion', expected $version; the build command must use `$env:VERSION"
   }
 }

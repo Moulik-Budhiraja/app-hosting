@@ -6,7 +6,8 @@
 #
 # The platform defaults to mac. Keys for every platform: app, remote_name,
 # remote_url, updater, tag_prefix (the first prefix), tag_prefixes (all of them,
-# longest first, separated by spaces), kind, command. For mac native builds:
+# longest first, separated by spaces), release_branches (separated by spaces,
+# empty when there are none), kind, command. For mac native builds:
 # app_path, entitlements, dmg_name; for mac electron builds: dmg, zip,
 # blockmap. For windows: installer, blockmap, minimum_system_version, icon.
 # Artifact paths may still contain {version}. A legacy top-level "build" reads

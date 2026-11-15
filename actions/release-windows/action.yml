@@ -162,6 +162,7 @@ runs:
         TAG: ${{ github.ref_name }}
         PREFIX: ${{ steps.config.outputs.tag_prefix }}
         PREFIXES: ${{ steps.config.outputs.tag_prefixes }}
+        RELEASE_BRANCHES: ${{ steps.config.outputs.release_branches }}
       run: |
         [[ $REF_TYPE == tag ]] || { echo "Releases run from tags like ${PREFIX}1.2.3 pushed on main" >&2; exit 1; }
         # The prefixes have no spaces (read-config checks), so split them into arguments.
@@ -272,19 +273,4 @@ runs:
         UPDATER: ${{ steps.config.outputs.updater }}
         VERSION: ${{ steps.tag.outputs.version }}
       run: |
-        if [[ $UPDATER == sparkle ]]; then
-          feed="$REMOTE_URL/$APP/appcast-windows.xml"
-          pattern="<sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>"
-        else
-          feed="$REMOTE_URL/$APP/latest.yml"
-          pattern="version: \"$VERSION\""
-        fi
-        for _ in $(seq 1 10); do
-          if curl --fail --silent --show-error --max-time 15 "$feed" | grep -qF "$pattern"; then
-            echo "$feed offers $VERSION"
-            exit 0
-          fi
-          sleep 3
-        done
-        echo "$feed doesn't offer $VERSION" >&2
-        exit 1
+        bash "$APPS_TOOLING/scripts/common/check-feed.sh" "$REMOTE_URL" "$APP" "$UPDATER" windows "$VERSION"
