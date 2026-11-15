@@ -1,16 +1,29 @@
 import { escapeHtml, markdownToHtml } from './markdown.ts';
 import type { AppRecord, Platform, Release, ReleaseFile, Role, Updater } from './store.ts';
+import { channelOf } from './versions.ts';
+import type { Channel } from './versions.ts';
 
 export const PLATFORM_NAMES: Record<Platform, string> = { mac: 'macOS', windows: 'Windows' };
 
-/** Each updater's feed file names, and the platform each one serves. */
-export const FEEDS: Record<Updater, Record<string, Platform>> = {
-  sparkle: { 'appcast.xml': 'mac', 'appcast-windows.xml': 'windows' },
-  electron: { 'latest-mac.yml': 'mac', 'latest.yml': 'windows' },
+/** Each updater's feed file names, and the platform and channel each one serves. */
+export const FEEDS: Record<Updater, Record<string, { platform: Platform; channel: Channel }>> = {
+  sparkle: {
+    'appcast.xml': { platform: 'mac', channel: 'stable' },
+    'appcast-windows.xml': { platform: 'windows', channel: 'stable' },
+    'appcast-beta.xml': { platform: 'mac', channel: 'beta' },
+    'appcast-windows-beta.xml': { platform: 'windows', channel: 'beta' },
+  },
+  // electron-updater names a channel's feed itself: <channel>-mac.yml and <channel>.yml.
+  electron: {
+    'latest-mac.yml': { platform: 'mac', channel: 'stable' },
+    'latest.yml': { platform: 'windows', channel: 'stable' },
+    'beta-mac.yml': { platform: 'mac', channel: 'beta' },
+    'beta.yml': { platform: 'windows', channel: 'beta' },
+  },
 };
 
-export function feedName(updater: Updater, platform: Platform): string {
-  return Object.entries(FEEDS[updater]).find(([, served]) => served === platform)![0];
+export function feedName(updater: Updater, platform: Platform, channel: Channel = 'stable'): string {
+  return Object.entries(FEEDS[updater]).find(([, feed]) => feed.platform === platform && feed.channel === channel)![0];
 }
 
 /** The visitor's platform from their User-Agent, or null when it's neither. */
@@ -21,17 +34,22 @@ export function detectPlatform(userAgent: string | undefined): Platform | null {
   return null;
 }
 
-export function liveReleases(releases: Release[]): Release[] {
-  return releases.filter((release) => !release.withdrawn);
+/**
+ * What a channel offers: the releases that aren't withdrawn. The stable channel
+ * leaves out betas. The beta channel has both, so it moves on to a stable
+ * release that is newer than its last beta.
+ */
+export function liveReleases(releases: Release[], channel: Channel = 'stable'): Release[] {
+  return releases.filter((release) => !release.withdrawn && (channel === 'beta' || channelOf(release.version) === 'stable'));
 }
 
 export function hasPlatform(release: Release, platform: Platform): boolean {
   return release.files.some((file) => file.platform === platform);
 }
 
-/** A platform's live releases: not withdrawn and with files for it, newest first. */
-export function platformReleases(releases: Release[], platform: Platform): Release[] {
-  return liveReleases(releases).filter((release) => hasPlatform(release, platform));
+/** A platform's live releases on a channel: those with files for it, newest first. */
+export function platformReleases(releases: Release[], platform: Platform, channel: Channel = 'stable'): Release[] {
+  return liveReleases(releases, channel).filter((release) => hasPlatform(release, platform));
 }
 
 export function fileWithRole(release: Release, platform: Platform, role: Role): ReleaseFile | undefined {
@@ -61,13 +79,13 @@ function cdata(text: string): string {
 export const APPCAST_LIMIT = 10;
 
 /**
- * A Sparkle appcast with the newest APPCAST_LIMIT live releases for one platform, newest first:
- * appcast.xml for Sparkle on macOS, appcast-windows.xml for WinSparkle.
- * WinSparkle compares sparkle:version with the app's own X.Y.Z, so it gets the version, not the build.
+ * A Sparkle appcast with a channel's newest APPCAST_LIMIT live releases for one platform, newest first:
+ * appcast.xml for Sparkle on macOS, appcast-windows.xml for WinSparkle, and their -beta forms.
+ * WinSparkle compares sparkle:version with the app's own version, so it gets the version, not the build.
  */
-export function sparkleAppcast(app: AppRecord, releases: Release[], publicUrl: string, platform: Platform = 'mac'): string {
+export function sparkleAppcast(app: AppRecord, releases: Release[], publicUrl: string, platform: Platform = 'mac', channel: Channel = 'stable'): string {
   const base = `${publicUrl}/${app.name}/`;
-  const items = platformReleases(releases, platform).slice(0, APPCAST_LIMIT).map((release) => {
+  const items = platformReleases(releases, platform, channel).slice(0, APPCAST_LIMIT).map((release) => {
     const file = downloadFile(release, platform);
     if (!file) return '';
     const info = release.platforms[platform];
@@ -108,13 +126,13 @@ export function sparkleAppcast(app: AppRecord, releases: Release[], publicUrl: s
 }
 
 /**
- * electron-updater's feed for a platform's latest release: latest-mac.yml (the
- * zip) or latest.yml (the NSIS installer). Null when there is none. URLs are
- * relative to /<app>/, where the feed is served. Strings are JSON-quoted, which
- * is valid YAML.
+ * electron-updater's feed for a platform's latest release on a channel:
+ * latest-mac.yml or beta-mac.yml (the zip), latest.yml or beta.yml (the NSIS
+ * installer). Null when there is none. URLs are relative to /<app>/, where the
+ * feed is served. Strings are JSON-quoted, which is valid YAML.
  */
-export function electronLatest(releases: Release[], platform: Platform = 'mac'): string | null {
-  const release = platformReleases(releases, platform)[0];
+export function electronLatest(releases: Release[], platform: Platform = 'mac', channel: Channel = 'stable'): string | null {
+  const release = platformReleases(releases, platform, channel)[0];
   if (!release) return null;
   const update = fileWithRole(release, platform, platform === 'mac' ? 'zip' : 'installer');
   if (!update) return null;

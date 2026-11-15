@@ -39,6 +39,11 @@ both. Its feeds are `appcast.xml` and `appcast-windows.xml` (native apps) or
 `latest-mac.yml` and `latest.yml` (Electron). `/download` gives the latest DMG or
 installer for the visitor's platform, and `/` is the download page.
 
+A tag like `v1.2.3-beta.1` ships a beta. Only the beta feeds offer it
+(`appcast-beta.xml`, `appcast-windows-beta.xml`, `beta-mac.yml`, `beta.yml`), so
+installs on the stable feeds, the download page and `/download` never see it. The
+beta feeds also offer stable releases. See "Beta releases" in the skill.
+
 ## Onboarding an app
 
 ```sh

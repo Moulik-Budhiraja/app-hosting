@@ -8,7 +8,7 @@ import { readIcon } from "../icon.js";
 import { SPARKLE_SERVICE, sparkleAccount } from "../secrets.js";
 import { publicKeyFor, signArchive } from "../sparkle.js";
 import { digestFile, putFile } from "../upload.js";
-import { defaultBuild, parseBuild, parseVersion } from "../version.js";
+import { channelOf, defaultBuild, normalizeVersion, parseBuild } from "../version.js";
 import { feedUrl } from "./setup.js";
 
 const SAFE_NAME = /^[A-Za-z0-9._-]+$/;
@@ -68,8 +68,8 @@ export function publishPlatform(options: Pick<PublishOptions, "platform" | "inst
 
 export async function publishCommand(deps: Deps, out: Out, options: PublishOptions): Promise<void> {
   const file = await readAppFile(options.dir);
-  if (!options.version) throw usage("Pass --version X.Y.Z.");
-  const version = parseVersion(options.version).join(".");
+  if (!options.version) throw usage("Pass --version X.Y.Z, or X.Y.Z-beta.N for a beta.");
+  const version = normalizeVersion(options.version);
   const build = options.build ? parseBuild(options.build) : defaultBuild(version);
   const platform = publishPlatform(options);
   const inputs: { path: string; role: Role }[] = [];
@@ -205,7 +205,8 @@ export async function publishCommand(deps: Deps, out: Out, options: PublishOptio
     }
   }
 
-  const feed = feedUrl(file, platform);
+  // A beta is offered on the beta feed only.
+  const feed = feedUrl(file, platform, channelOf(release.version));
   out.result(
     [
       `Published ${file.app} ${release.version} (build ${release.build}) for ${PLATFORM_NAMES[platform]} to ${file.remote.name}.`,

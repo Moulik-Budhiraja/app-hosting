@@ -63,6 +63,9 @@ apps publish --version 1.2.0 --dmg dist/ScreenDraw-1.2.0.dmg --notes-file NOTES.
 apps publish --version 0.5.0 --dmg dist/App.dmg --zip dist/App-0.5.0-mac.zip --blockmap dist/App-0.5.0-mac.zip.blockmap
 ```
 
+A version like `1.2.0-beta.1` publishes a beta, which only the beta feeds offer.
+`apps status --channel beta` checks those feeds.
+
 The build number defaults to the version's scheme (`apps build-number 1.2.3` prints
 100200300). Override it with `--build`. In CI, `APPS_TOKEN` and `SPARKLE_PRIVATE_KEY`
 replace the keychain. `--icon icon.png` also updates the icon on the download page; the

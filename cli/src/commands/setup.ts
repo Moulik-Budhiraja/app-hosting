@@ -24,6 +24,7 @@ import { client, requireAdmin, type Deps, type Out } from "../context.js";
 import { CliError, EXIT, usage } from "../errors.js";
 import { generateSparkleKeys, publicKeyFor } from "../sparkle.js";
 import { SPARKLE_SERVICE, sparkleAccount } from "../secrets.js";
+import type { Channel } from "../version.js";
 
 export const ENVIRONMENT = "production";
 export const WORKFLOW_PATH = ".github/workflows/release.yml";
@@ -102,8 +103,8 @@ jobs:
 ${jobs.join("\n")}`;
 }
 
-export function feedUrl(file: Pick<AppFile, "app" | "remote" | "updater">, platform: Platform = "mac"): string {
-  return `${file.remote.url}/${file.app}/${feedName(file.updater, platform)}`;
+export function feedUrl(file: Pick<AppFile, "app" | "remote" | "updater">, platform: Platform = "mac", channel: Channel = "stable"): string {
+  return `${file.remote.url}/${file.app}/${feedName(file.updater, platform, channel)}`;
 }
 
 /** Each built platform's feed URL. */

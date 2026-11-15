@@ -9,7 +9,7 @@ import { HttpError, badRequest, isObject } from './http.ts';
 import { isSparkleSignature, verifySparkleSignature } from './sparkle.ts';
 import type { AppRecord, Platform, Release, ReleaseFile, Role, Store, Updater } from './store.ts';
 import { isPlatform, writeJsonAtomic } from './store.ts';
-import { compareVersions, defaultBuild, isVersion } from './versions.ts';
+import { channelOf, compareVersions, defaultBuild, isVersion } from './versions.ts';
 
 export const UPLOAD_TTL_MS = 6 * 60 * 60 * 1000;
 export const MAX_FILE_SIZE = 4 * 1024 ** 3;
@@ -118,12 +118,15 @@ function parseFiles(app: AppRecord, platform: Platform, value: unknown): Declare
 
 /**
  * Checks the version rules for publishing `platform` of `version`, and returns
- * the build to use. Either it's a new release, newer than every release, or a
- * new platform for an existing release.
+ * the build to use. Either it's a new release or a new platform for an existing
+ * release. A beta has to be newer than every release. A stable release only has
+ * to be newer than the stable ones, so a fix for the stable version can ship
+ * while a later version is in beta.
  */
-function checkVersion(releases: Release[], platform: Platform, version: string, build: number | undefined, names: string[]): number {
+function checkVersion(all: Release[], platform: Platform, version: string, build: number | undefined, names: string[]): number {
   const label = PLATFORM_NAMES[platform];
-  const existing = releases.find((release) => release.version === version);
+  const existing = all.find((release) => release.version === version);
+  const releases = channelOf(version) === 'beta' ? all : all.filter((release) => release === existing || channelOf(release.version) === 'stable');
   if (existing) {
     if (hasPlatform(existing, platform)) {
       throw new HttpError(409, 'already_published', `${version} is already published for ${label}`);
@@ -143,6 +146,7 @@ function checkVersion(releases: Release[], platform: Platform, version: string, 
   }
 
   const resolved = build ?? defaultBuild(version);
+  if (resolved < 1) throw badRequest('invalid_build', `${version} has no default build; pass one`);
   for (const release of releases) {
     if (compareVersions(version, release.version) <= 0) {
       throw new HttpError(409, 'version_not_newer', `${version} is not newer than ${release.version}`);
@@ -159,7 +163,7 @@ export async function startUpload(store: Store, app: AppRecord, body: unknown): 
   const { version, notes, minimumSystemVersion, edSignature } = body;
   const platform = body.platform ?? 'mac';
   if (!isPlatform(platform)) throw badRequest('invalid_platform', 'platform must be mac or windows');
-  if (!isVersion(version)) throw badRequest('invalid_version', 'version must look like 1.2.3');
+  if (!isVersion(version)) throw badRequest('invalid_version', 'version must look like 1.2.3 or 1.2.3-beta.1');
   const build = body.build;
   if (build !== undefined && (typeof build !== 'number' || !Number.isSafeInteger(build) || build < 1)) {
     throw badRequest('invalid_build', 'build must be a positive integer');

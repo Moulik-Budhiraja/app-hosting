@@ -4,7 +4,7 @@ import { loadConfig, parseHostAliases } from '../src/config.ts';
 import { parseRange } from '../src/files.ts';
 import { markdownToHtml } from '../src/markdown.ts';
 import { isSparklePublicKey, verifySparkleSignature } from '../src/sparkle.ts';
-import { compareVersions, defaultBuild, parseVersion } from '../src/versions.ts';
+import { channelOf, compareVersions, defaultBuild, isVersion, parseVersion } from '../src/versions.ts';
 import { sparkleKeys } from './helpers.ts';
 
 test('versions', () => {
@@ -15,6 +15,24 @@ test('versions', () => {
   assert.equal(parseVersion('v1.2.3'), null);
   assert.ok(compareVersions('1.10.0', '1.9.9') > 0);
   assert.equal(compareVersions('2.0.0', '2.0.0'), 0);
+});
+
+test('beta versions', () => {
+  for (const version of ['1.2.3-beta.1', '0.8.0-beta.99']) assert.ok(isVersion(version), version);
+  for (const version of ['1.2.3-beta.0', '1.2.3-beta.100', '1.2.3-beta.01', '1.2.3-beta', '1.2.3-alpha.1', '1.2.3-rc.1', '1.2.3-beta.1.2']) {
+    assert.ok(!isVersion(version), version);
+  }
+  assert.equal(channelOf('1.2.3-beta.1'), 'beta');
+  assert.equal(channelOf('1.2.3'), 'stable');
+  // A version's betas come before it and after the version below it.
+  const ordered = ['1.2.2', '1.2.3-beta.1', '1.2.3-beta.2', '1.2.3-beta.10', '1.2.3', '1.2.4-beta.1'];
+  for (let i = 1; i < ordered.length; i++) {
+    assert.ok(compareVersions(ordered[i]!, ordered[i - 1]!) > 0, `${ordered[i]} > ${ordered[i - 1]}`);
+    assert.ok(defaultBuild(ordered[i]!) > defaultBuild(ordered[i - 1]!), `build of ${ordered[i]} > ${ordered[i - 1]}`);
+  }
+  assert.equal(defaultBuild('1.2.3-beta.4'), 100200204);
+  assert.equal(defaultBuild('1.2.0-beta.1'), 100199901);
+  assert.ok(defaultBuild('1.2.0-beta.1') > defaultBuild('1.1.999'));
 });
 
 test('markdown escapes everything it does not understand', () => {

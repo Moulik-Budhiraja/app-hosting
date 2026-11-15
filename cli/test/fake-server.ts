@@ -2,6 +2,7 @@
 import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { channelOf, compareVersions } from "../src/version.js";
 
 const SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
@@ -28,16 +29,15 @@ export interface FakeServer {
   close(): Promise<void>;
 }
 
-function newer(a: string, b: string): boolean {
-  const left = a.split(".").map(Number);
-  const right = b.split(".").map(Number);
-  for (let i = 0; i < 3; i += 1) if (left[i] !== right[i]) return left[i]! > right[i]!;
-  return false;
-}
+const newer = (a: string, b: string): boolean => compareVersions(a, b) > 0;
 
-/** The version rules from DESIGN.md: a new release, or a new platform for an existing one. */
-function checkVersion(app: StoredApp, body: { version: string; platform: Platform; build?: number }): { code: string; message: string } | null {
-  const existing = app.releases.find((release) => release.version === body.version);
+/**
+ * The version rules from DESIGN.md: a new release, or a new platform for an
+ * existing one. A stable release is only checked against the stable ones.
+ */
+function checkVersion(stored: StoredApp, body: { version: string; platform: Platform; build?: number }): { code: string; message: string } | null {
+  const existing = stored.releases.find((release) => release.version === body.version);
+  const app = { releases: stored.releases.filter((release) => release === existing || channelOf(body.version) === "beta" || channelOf(release.version) === "stable") };
   if (existing) {
     if (existing.files.some((file) => file.platform === body.platform)) return { code: "already_published", message: `${body.version} already has ${body.platform} files` };
     if (existing.withdrawn) return { code: "release_withdrawn", message: `${body.version} is withdrawn` };
@@ -93,29 +93,33 @@ export async function startFakeServer(): Promise<FakeServer> {
     if (parts[0] !== "api") {
       const app = apps.get(parts[0] ?? "");
       if (!app) return fail(res, 404, "not_found", "Not found");
-      const live = (platform: Platform) => [...app.releases]
-        .filter((release) => !release.withdrawn && release.files.some((file) => file.platform === platform))
+      const offered = (release: StoredRelease, channel: string | null) => !release.withdrawn && (channel === "beta" || channelOf(release.version) === "stable");
+      const live = (platform: Platform, channel: string | null = null) => [...app.releases]
+        .filter((release) => offered(release, channel) && release.files.some((file) => file.platform === platform))
         .sort((a, b) => b.build - a.build);
       if (parts[1] === "releases.json") {
-        const live = app.releases.filter((release) => !release.withdrawn).sort((a, b) => b.build - a.build).map(publicRelease);
+        // Servers from before paging had no channels either.
+        const channel = fake.legacyReleasesJson ? "beta" : url.searchParams.get("channel");
+        const live = app.releases.filter((release) => offered(release, channel)).sort((a, b) => b.build - a.build).map(publicRelease);
         if (fake.legacyReleasesJson) return send(res, 200, live);
         const limit = Math.min(Number(url.searchParams.get("limit") ?? 20), fake.releasesPageMax);
         const beforeVersion = url.searchParams.get("before");
         const rest = beforeVersion ? live.filter((release) => newer(beforeVersion, release.version)) : live;
         const page = rest.slice(0, limit);
         // On another host, the way a server behind a proxy names its public address.
-        const next = rest.length > limit ? `https://public.example.test/${app.name}/releases.json?limit=${limit}&before=${page.at(-1)!.version}` : null;
+        const next = rest.length > limit ? `https://public.example.test/${app.name}/releases.json?limit=${limit}&before=${page.at(-1)!.version}${channel === "beta" ? "&channel=beta" : ""}` : null;
         return send(res, 200, { releases: page, next });
       }
-      const appcasts: Record<string, Platform> = { "appcast.xml": "mac", "appcast-windows.xml": "windows" };
+      const feedChannel = (parts[1] ?? "").includes("beta") ? "beta" : null;
+      const appcasts: Record<string, Platform> = { "appcast.xml": "mac", "appcast-windows.xml": "windows", "appcast-beta.xml": "mac", "appcast-windows-beta.xml": "windows" };
       if (appcasts[parts[1] ?? ""] && app.updater === "sparkle") {
         const platform = appcasts[parts[1]!]!;
-        const items = live(platform).map((release) => `<item><title>${release.version}</title><sparkle:version>${platform === "mac" ? release.build : release.version}</sparkle:version><sparkle:shortVersionString>${release.version}</sparkle:shortVersionString></item>`).join("");
+        const items = live(platform, feedChannel).map((release) => `<item><title>${release.version}</title><sparkle:version>${platform === "mac" ? release.build : release.version}</sparkle:version><sparkle:shortVersionString>${release.version}</sparkle:shortVersionString></item>`).join("");
         return send(res, 200, `<?xml version="1.0"?><rss><channel>${items}</channel></rss>`, "application/xml");
       }
-      const ymls: Record<string, Platform> = { "latest-mac.yml": "mac", "latest.yml": "windows" };
+      const ymls: Record<string, Platform> = { "latest-mac.yml": "mac", "latest.yml": "windows", "beta-mac.yml": "mac", "beta.yml": "windows" };
       if (ymls[parts[1] ?? ""] && app.updater === "electron") {
-        const latest = live(ymls[parts[1]!]!)[0];
+        const latest = live(ymls[parts[1]!]!, feedChannel)[0];
         if (!latest) return fail(res, 404, "not_found", "No releases");
         return send(res, 200, `version: ${JSON.stringify(latest.version)}\npath: "x"\n`, "text/yaml");
       }
