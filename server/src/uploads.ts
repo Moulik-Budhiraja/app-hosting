@@ -151,8 +151,16 @@ function checkVersion(all: Release[], platform: Platform, version: string, build
     if (compareVersions(version, release.version) <= 0) {
       throw new HttpError(409, 'version_not_newer', `${version} is not newer than ${release.version}`);
     }
-    if (resolved <= release.build) {
+  }
+  // Builds keep the order of the versions across both channels, betas included:
+  // Sparkle on macOS compares builds, and the beta feed lists stable releases too.
+  for (const release of all) {
+    const newer = compareVersions(version, release.version) > 0;
+    if (newer && resolved <= release.build) {
       throw new HttpError(409, 'build_not_higher', `Build ${resolved} is not higher than ${release.version}'s build ${release.build}`);
+    }
+    if (!newer && resolved >= release.build) {
+      throw new HttpError(409, 'build_not_lower', `Build ${resolved} is not lower than the newer ${release.version}'s build ${release.build}`);
     }
   }
   return resolved;

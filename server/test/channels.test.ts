@@ -116,6 +116,14 @@ describe('stable and beta channels', () => {
     assert.equal(await code(await mac('1.0.0', { build: 999 })), 'already_published');
   });
 
+  test('builds keep the order of the versions across both channels', async () => {
+    // 1.1.0-beta.2 is build 100099902, and 1.0.1 is 100000100.
+    assert.equal(await code(await mac('1.1.0', { build: 100000101 })), 'build_not_higher');
+    assert.equal(await code(await mac('1.1.0', { build: 100099902 })), 'build_not_higher');
+    assert.equal(await code(await mac('1.0.2', { build: 100099902 })), 'build_not_lower');
+    assert.equal(await code(await mac('1.0.2', { build: 100000100 })), 'build_not_higher');
+  });
+
   test('withdrawing a beta takes it off the beta feed', async () => {
     assert.equal((await api(h, 'POST', '/api/apps/chat/releases/1.1.0-beta.2/withdraw')).status, 200);
     assert.equal(await feedVersion('/chat/beta-mac.yml'), '1.1.0-beta.1');
