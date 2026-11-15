@@ -97,6 +97,8 @@ describe('macOS and Windows releases', () => {
     const release = await json(res);
     assert.equal(release.build, 100000000);
     assert.equal(release.notes, 'Mac notes', 'the first notes stay');
+    assert.equal(release.platforms.windows.notes, 'Windows notes', 'and Windows keeps its own');
+    assert.equal(release.platforms.mac.notes, undefined);
     assert.deepEqual(release.files.map((f: any) => [f.platform, f.role]), [['mac', 'dmg'], ['windows', 'installer']]);
     assert.equal(release.files[1].edSignature, keys.sign(exe));
     assert.equal(release.files[1].url, `${PUBLIC_URL}/native/releases/1.0.0/Native-Setup-1.0.0.exe`);
@@ -110,8 +112,12 @@ describe('macOS and Windows releases', () => {
     assert.match(xml, /<sparkle:minimumSystemVersion>10\.0\.17763<\/sparkle:minimumSystemVersion>/);
     assert.ok(xml.includes(`<enclosure url="${PUBLIC_URL}/native/releases/1.0.0/Native-Setup-1.0.0.exe" length="1500" type="application/octet-stream" sparkle:os="windows" sparkle:edSignature="${keys.sign(exe)}"/>`));
     assert.ok(!xml.includes('.dmg'));
+    assert.ok(xml.includes('Windows notes') && !xml.includes('Mac notes'), 'each feed has its platform\'s notes');
     const macXml = await (await fetch(`${h.base}/native/appcast.xml`)).text();
     assert.ok(!macXml.includes('.exe'));
+    assert.ok(macXml.includes('Mac notes') && !macXml.includes('Windows notes'));
+    assert.match(await (await fetch(`${h.base}/native/?platform=windows`)).text(), /Windows notes/);
+    assert.match(await (await fetch(`${h.base}/native/?platform=mac`)).text(), /Mac notes/);
     assert.match(macXml, /<sparkle:version>100000000<\/sparkle:version>/);
 
     const file = await fetch(`${h.base}/native/releases/1.0.0/Native-Setup-1.0.0.exe`);

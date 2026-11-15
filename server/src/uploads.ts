@@ -326,7 +326,13 @@ export async function commitUpload(store: Store, app: AppRecord, id: string): Pr
       await fs.rename(path.join(filesDir, file.name), path.join(target, file.name));
     }
     const now = new Date().toISOString();
-    const info = { publishedAt: now, ...(state.minimumSystemVersion ? { minimumSystemVersion: state.minimumSystemVersion } : {}) };
+    // A platform that joins a release with notes of its own keeps them: an app's notes can differ by platform.
+    const ownNotes = existing?.notes.trim() && state.notes.trim() && state.notes !== existing.notes ? state.notes : undefined;
+    const info = {
+      publishedAt: now,
+      ...(state.minimumSystemVersion ? { minimumSystemVersion: state.minimumSystemVersion } : {}),
+      ...(ownNotes ? { notes: ownNotes } : {}),
+    };
     const release: Release = existing
       ? {
           ...existing,
