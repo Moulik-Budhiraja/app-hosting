@@ -411,6 +411,10 @@ Starting an upload publishes one platform:
   A beta is checked against every release. A stable release is checked against the
   stable ones only, so a fix for the stable version can ship while a later version is
   in beta: 1.0.1 publishes after 1.1.0-beta.1, and beta installs stay on the beta.
+  A new release's `build` still has to keep the order of the versions across both
+  channels: higher than the build of every older release, and lower than the build
+  of every newer one (else 409 `build_not_higher` or `build_not_lower`). The default
+  builds always do.
 - the file names are safe (`^[A-Za-z0-9._-]+$`, no leading dot), and the files are
   exactly what the role table allows for the app's updater and this platform. An
   `installer` ends in `.exe` or `.msi` (`.exe` only for electron).
