@@ -44,6 +44,8 @@ export interface ReleaseFile {
 export interface PlatformInfo {
   publishedAt: string;
   minimumSystemVersion?: string;
+  /** This platform's notes, when it was published with other notes than the release already had. */
+  notes?: string;
 }
 
 export interface Release {

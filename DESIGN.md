@@ -184,7 +184,7 @@ temporary file followed by a rename.
   "withdrawn": false,
   "platforms": {
     "mac": { "publishedAt": "ISO", "minimumSystemVersion": "13.0" },
-    "windows": { "publishedAt": "ISO", "minimumSystemVersion": "10.0" }
+    "windows": { "publishedAt": "ISO", "minimumSystemVersion": "10.0", "notes": "markdown" }
   },
   "files": [
     { "name": "ScreenDraw-1.2.3.dmg", "platform": "mac", "role": "dmg", "size": 1,
@@ -195,6 +195,10 @@ temporary file followed by a rename.
 ```
 - `publishedAt` at the top is when the first platform was published. Each entry in
   `platforms` has its own `publishedAt`, and its `minimumSystemVersion` when one was given.
+- `notes` at the top are the notes of the first platform published. A platform that
+  joins the release with other notes keeps them as `platforms.<platform>.notes`. A
+  platform's feeds and download page show its own notes when it has them, else the
+  release's, so an app can say different things on each platform.
 - `edSignature` sits on the file that the updater downloads: the DMG on macOS and the
   installer on Windows. Only `sparkle` apps have it.
 - Older `release.json` files have no `platforms`, no `platform` on files, and keep
@@ -435,8 +439,9 @@ On commit, the server:
   committed the release in the meantime: a new release that now exists is checked as a
   new platform for it.
 - moves the files into `releases/<version>/` and writes `release.json` last. A new
-  platform's files join the existing release. Its notes are kept, unless they're empty
-  and the upload has notes. A leftover file from an interrupted commit (in the folder
+  platform's files join the existing release. The release's notes are kept, unless
+  they're empty and the upload has notes. When both have notes and they differ, the
+  upload's become that platform's own notes. A leftover file from an interrupted commit (in the folder
   but not in `release.json`) is replaced.
 
 Re-running a commit that already succeeded returns 409 `already_published`.

@@ -1,4 +1,4 @@
-import { downloadFile, platformDate, platformReleases } from './feeds.ts';
+import { downloadFile, platformDate, platformNotes, platformReleases } from './feeds.ts';
 import { iconVersion } from './icons.ts';
 import { escapeHtml, markdownToHtml } from './markdown.ts';
 import type { AppRecord, Platform, Release } from './store.ts';
@@ -189,8 +189,9 @@ export function appPage(
   if (side) body += `<span class="side">${side}</span>`;
   body += '</div></header>';
 
-  if (latest.notes.trim()) {
-    body += `<section><h2>What’s new</h2><div class="notes">${markdownToHtml(latest.notes)}</div></section>`;
+  const notes = platformNotes(latest, platform);
+  if (notes.trim()) {
+    body += `<section><h2>What’s new</h2><div class="notes">${markdownToHtml(notes)}</div></section>`;
   }
   const older = live.slice(1, 6);
   if (older.length) {

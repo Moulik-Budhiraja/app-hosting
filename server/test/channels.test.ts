@@ -149,6 +149,22 @@ describe('stable and beta channels', () => {
     await assert.rejects(run('electron', 'linux', '1.1.0'), /no feed for electron on linux/);
   });
 
+  test('electron feeds give each platform its own notes', async () => {
+    assert.equal((await mac('1.2.0', { notes: 'For the Mac' })).status, 201);
+    assert.equal((await win('1.2.0')).status, 201);
+    assert.match(await text('/chat/latest-mac.yml'), /releaseNotes: "For the Mac"/);
+    // Windows joined without notes, so it shows the release's.
+    assert.match(await text('/chat/latest.yml'), /releaseNotes: "For the Mac"/);
+    const data = randomBytes(64);
+    const same = await publish(h, 'chat', { version: '1.2.1', notes: 'Shared' }, [{ name: 'Chat-1.2.1.dmg', role: 'dmg', data }, { name: 'Chat-1.2.1-mac.zip', role: 'zip', data }]);
+    assert.equal(same.status, 201);
+    const windows = await publish(h, 'chat', { version: '1.2.1', platform: 'windows', notes: 'For Windows' }, [{ name: 'Chat-Setup-1.2.1.exe', role: 'installer', data }]);
+    assert.equal((await json(windows)).platforms.windows.notes, 'For Windows');
+    assert.match(await text('/chat/latest-mac.yml'), /releaseNotes: "Shared"/);
+    assert.match(await text('/chat/latest.yml'), /releaseNotes: "For Windows"/);
+    assert.equal((await json(await get('/chat/latest.json?platform=windows'))).platforms.windows.notes, 'For Windows');
+  });
+
   test('an app with only betas has nothing on the stable channel', async () => {
     const data = randomBytes(64);
     const res = await publish(h, 'early', { version: '0.1.0-beta.1' }, [

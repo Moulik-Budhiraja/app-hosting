@@ -61,6 +61,11 @@ export function downloadFile(release: Release, platform: Platform): ReleaseFile 
   return fileWithRole(release, platform, platform === 'mac' ? 'dmg' : 'installer');
 }
 
+/** A release's notes as a platform shows them: its own when it has them, else the release's. */
+export function platformNotes(release: Release, platform: Platform): string {
+  return release.platforms[platform]?.notes ?? release.notes;
+}
+
 /** When a platform of a release was published. */
 export function platformDate(release: Release, platform: Platform): string {
   return release.platforms[platform]?.publishedAt ?? release.publishedAt;
@@ -99,8 +104,9 @@ export function sparkleAppcast(app: AppRecord, releases: Release[], publicUrl: s
     if (info?.minimumSystemVersion) {
       lines.push(`      <sparkle:minimumSystemVersion>${escapeHtml(info.minimumSystemVersion)}</sparkle:minimumSystemVersion>`);
     }
-    if (release.notes.trim()) {
-      lines.push(`      <description>${cdata(markdownToHtml(release.notes))}</description>`);
+    const notes = platformNotes(release, platform);
+    if (notes.trim()) {
+      lines.push(`      <description>${cdata(markdownToHtml(notes))}</description>`);
     }
     const os = platform === 'windows' ? ' sparkle:os="windows"' : '';
     lines.push(
@@ -154,6 +160,7 @@ export function electronLatest(releases: Release[], platform: Platform = 'mac', 
     `releaseDate: ${q(platformDate(release, platform))}`,
   );
   if (info?.minimumSystemVersion) lines.push(`minimumSystemVersion: ${q(info.minimumSystemVersion)}`);
-  if (release.notes.trim()) lines.push(`releaseNotes: ${q(release.notes)}`);
+  const notes = platformNotes(release, platform);
+  if (notes.trim()) lines.push(`releaseNotes: ${q(notes)}`);
   return `${lines.join('\n')}\n`;
 }
